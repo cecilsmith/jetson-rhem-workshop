@@ -1,0 +1,23 @@
+# Download pull secret for microshift: https://console.redhat.com/openshift/install/pull-secret and place it in the build directory as pull-secret
+# Pull secret should also be pasted into the kickstart file where indicated
+# For simplicity, this script should be run after sudo su - root.  Make sure to log into registry.redhat.io after sudoing.
+
+# This installs mkksiso
+dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm lorax
+
+podman login registry.redhat.io
+
+# podman login your-registry.com
+
+export IMAGE_NAME=your-registry.com:tag 
+export USER_PASSWORD=password
+export PULL_SECRET=./pull-secret
+export KICKSTART=./rhem.ks
+
+mkdir ./output
+
+podman build --authfile "${PULL_SECRET}" -t "${IMAGE_NAME}" --secret "id=pullsecret,src=${PULL_SECRET}"  --build-arg USER_PASSWD="${USER_PASSWORD}" -f ContainerFile-Jetson
+
+podman run --rm -it     --privileged     --security-opt label=type:unconfined_t     -v /var/lib/containers/storage:/var/lib/containers/storage     -v ./output:/output     registry.redhat.io/rhel9/bootc-image-builder:9.4     --local     --type iso ${IMAGE_NAME}
+
+mkksiso ${KICKSTART} ./output/bootiso/install.iso bootc-plus-kickstart.iso
