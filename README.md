@@ -12,28 +12,6 @@ that will be used to flash edge devices managed by Flight Control.
 * Ideally, a way to connect to your network via cables.  Wireless networking will involve additional steps outside the scope of this repo.
 * One or more NVIDIA Orin-based devices to manage (Nano, NX, AGX)
 
-## DNS Records
-
-FlightCtl will also need the following DNS records available in your environment.
-Bind DNS and DHCP servers can be installed on your FlightCtl server if needed or
-use existing services in your environment.  These DNS records must be resolvable
-by both the managed edge devices as well as any administrators of FlightCtl
-
-A Record: systemname.domain.foo                 X.X.X.X  
-CNAME:    ui.flightctl.systemname.domain.foo    systemname.domain.foo  
-CNAME:    api.flightctl.systemname.domain.foo   systemname.domain.foo  
-CNAME:    auth.systemname.domain.foo            systemname.domain.foo  
-CNAME:    agent-api.systemname.domain.foo       systemname.domain.foo  
-
-# RHEL Image Mode Background
-RHEL Image Mode enables management of edge device systems in a simplified
-way by taking advantage of container application infrastructure. By
-packaging operating system updates as an OCI container, RHEL Image Mode
-simplifies the distribution and deployment of operating systems and
-their updates, easing the amount of resources necessary to maintain a
-disparate fleet of edge devices.
-
-
 ## Initial Setup
 Start with a minimal install of RHEL 9.6 either on baremetal or on a guest
 VM. Use UEFI firmware, if able to, when installing your system. Also make
