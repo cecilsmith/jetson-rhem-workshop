@@ -43,4 +43,10 @@ Save this config.yaml file for use later!
 
 # Managed Device Image Creation
 
-Currently, building images on an x86 computer for NVIDIA ARM-based devices is very challenging.  I recommend creating an NVIDIA "build server" based on the bootc ContainerFile in this repo (ContainerFile-Jetson-rhem-1.0.2-base).  Bootstrapping this setup can be a challenge if you don't have an ARM server available, though you may be able to perform an initial build using an AWS Graviton instance if you don't have an NVIDIA system available.  The steps for creating the managed device images are found in the jetson-bootc-build-commands file in this repository and a sample kickstart file is rhem.ks.
+Currently, building images on an x86 computer for NVIDIA ARM-based devices is very challenging, so I recommend creating an NVIDIA "build server."  Bootstrapping this setup can be a challenge if you don't have an ARM server available, though you may be able to perform an initial build using an AWS Graviton instance if you don't have an NVIDIA system available. 
+
+Once you have a build server, you can use the resources in the managed-device-artifacts folder of this repository to make managed device images:
+* jetson-bootc-build-commands: This contains the steps for creating a RHEL Image mode (bootc) ISO.
+* ContainerFile-Jetson-rhem-1.0.2-base:  This is the containerfile you will use to create the base image, which also includes the Flight Control agent (set to the same version as the server used in this repository).
+* ContainerFile-Jetson-rhem-1.0.2-with-config:  This builds on the image you created above, and adds the config.yaml file for your Flight Control server that you exported in the "Post Installation Steps."
+* rhem.ks:  This is a sample kickstart file for use in the mkksiso step of the jetson-bootc-build-commands build-commands 
