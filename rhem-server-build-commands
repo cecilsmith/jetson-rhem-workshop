@@ -1,0 +1,19 @@
+dnf clean all
+ 
+dnf config-manager --add-repo https://rpm.flightctl.io/flightctl-epel.repo
+ 
+dnf install -y flightctl-services-1.0.2-1.el9.x86_64
+ 
+systemctl start flightctl.target
+
+ONCE DONE
+
+podman exec -i flightctl-pam-issuer groupadd flightctl-admin
+ 
+podman exec flightctl-pam-issuer adduser admin
+ 
+podman exec -i flightctl-pam-issuer sh -c 'echo "admin:admin" | chpasswd'
+
+podman exec -i flightctl-pam-issuer usermod -aG flightctl-admin admin
+ 
+systemctl restart flightctl.target
