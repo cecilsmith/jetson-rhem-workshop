@@ -26,4 +26,17 @@ Once the system is back up
 
 # Flight Control Server Installation
 
-Go into the ./jetson-rhem-workshop directory that you cloned and run the  
+* Go into the ./jetson-rhem-workshop directory that you cloned
+* Run sudo ./1_configure-firewall-and-registry.sh
+* Run sudo ./2_rhem-server-build-commands.sh
+
+Once these scripts are complete, you should be able to open the Flight Control web UI at https://<laptop hostname>.  The login credentials are admin/admin unless you changed them in the 2_rhem-server-build-commands.sh script.
+
+# Post Installation Steps
+
+With Flight Control now installed, you can generate the config.yaml file that you'll need to place on your managed devices to allow them to enroll to the server:
+
+* flightctl login https://<laptop hostname>:3443 --insecure-skip-tls-verify --web
+* flightctl certificate request --signer=enrollment --expiration=365d --output=embedded > config.yaml
+
+Save this config.yaml file for use later!
