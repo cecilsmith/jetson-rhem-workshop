@@ -6,7 +6,7 @@
 # Set your host IP here
 HOSTIP=192.168.1.2
 
-firewall-cmd --permanent --add-port=5000/tcp --add-port=3443/tcp --add-port=7443/tcp
+firewall-cmd --permanent --add-port=5000/tcp --add-port=3443/tcp --add-port=7443/tcp --add-port=8444/tcp
 firewall-cmd --reload
 
 
