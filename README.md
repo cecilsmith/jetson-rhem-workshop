@@ -12,16 +12,17 @@ that will be used to flash edge devices managed by Flight Control.
 * Ideally, a way to connect to your network via cables.  Wireless networking will involve additional steps outside the scope of this repo.
 * One or more NVIDIA Orin-based devices to manage (Nano, NX, AGX)
 
-## Initial Setup
-Start with a minimal install of RHEL 9.6 either on baremetal or on a guest
-VM. Use UEFI firmware, if able to, when installing your system. Also make
-sure there's sufficient disk space on the RHEL 9.4 instance to support the
-demo. I typically configure a 128 GiB disk on the guest VM.  During RHEL
+# Laptop Setup
+Start with a server+GUI RHEL 9.x installation, with the "container management" software group selected.  During RHEL
 installation, configure a regular user with `sudo` privileges on the host.
 I have successfully deployed this setup on a NUC with 12 GB RAM and an Intel
 N97 processor, which are pretty minimal specifications, but you can likely go
 even lower on RAM if needed.
 
+Once the system is back up
+
+* sudo dnf install -y git 
+* git clone 
 These instructions assume that this Git repository is cloned or copied to your
 user's home directory on the host (e.g. `~/rhel-bootc-plus-flightctl`). The
 instructions below follow that assumption.
