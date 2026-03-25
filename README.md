@@ -36,7 +36,7 @@ Once these scripts are complete, you should be able to open the Flight Control w
 
 With Flight Control now installed, you can generate the config.yaml file that you'll need to place on your managed devices to allow them to enroll to the server:
 
-* flightctl login https://<laptop hostname>:3443 --insecure-skip-tls-verify --web
+* flightctl login https://LAPTOP-HOSTNAME:3443 --insecure-skip-tls-verify --web
 * flightctl certificate request --signer=enrollment --expiration=365d --output=embedded > config.yaml
 
 Save this config.yaml file for use later!
