@@ -33,7 +33,7 @@ Once the system is back up
 * Run sudo ./1_configure-firewall-and-registry.sh
 * Run sudo ./2_rhem-server-build-commands.sh
 
-Once these scripts are complete, you should be able to open the Flight Control web UI at https://<laptop hostname>.  The login credentials are admin/admin unless you changed them in the 2_rhem-server-build-commands.sh script.
+Once these scripts are complete, you should be able to open the Flight Control web UI at https://LAPTOP_HOSTNAME.  The login credentials are admin/admin unless you changed them in the 2_rhem-server-build-commands.sh script.
 
 # Post Installation Steps
 
