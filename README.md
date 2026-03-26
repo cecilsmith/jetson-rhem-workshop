@@ -42,7 +42,9 @@ With Flight Control now installed, you can generate the config.yaml file that yo
 * flightctl login https://LAPTOP-HOSTNAME:3443 --insecure-skip-tls-verify --web
 * flightctl certificate request --signer=enrollment --expiration=365d --output=embedded > config.yaml
 
-Save this config.yaml file for use later!
+Add the following line to the end of the config.yaml file and save it for use later!
+
+* spec-fetch-interval: 5s
 
 # Managed Device Image Creation
 
