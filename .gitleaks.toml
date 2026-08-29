@@ -1,0 +1,86 @@
+# gitleaks configuration for jetson-rhem-workshop
+#
+# Extends the upstream default ruleset and adds rules for the credential
+# shapes that actually show up in this repo: Red Hat subscription/registry
+# logins, OpenShift pull secrets, Flight Control enrollment configs, and
+# baked-in device passwords in the Jetson Containerfiles.
+
+title = "jetson-rhem-workshop secret scanning"
+
+[extend]
+useDefault = true
+
+# --------------------------------------------------------------------------
+# Red Hat subscription-manager credentials
+# --------------------------------------------------------------------------
+
+[[rules]]
+id = "rh-subscription-manager-password"
+description = "subscription-manager invoked with a literal password"
+regex = '''subscription-manager[^\n]{0,200}?--password[= ]+["']?(?!\$)([^\s"']{4,})'''
+tags = ["redhat", "password"]
+
+[[rules]]
+id = "rh-containerfile-arg-password"
+description = "Containerfile ARG with a hardcoded password/credential default"
+regex = '''(?i)^\s*ARG\s+(RH_PASSWD|RH_PASSWORD|USER_PASSWD|USER_PASSWORD|ROOT_PASSWD|REGISTRY_PASSWORD)\s*=\s*["']?([^\s"'#]+)'''
+path = '''(?i)containerfile.*'''
+tags = ["redhat", "password", "containerfile"]
+
+[[rules]]
+id = "rh-containerfile-arg-username"
+description = "Containerfile ARG with a hardcoded Red Hat account username"
+regex = '''(?i)^\s*ARG\s+(RH_USERNAME|RH_USER|REGISTRY_USERNAME)\s*=\s*["']?([^\s"'#]+)'''
+path = '''(?i)containerfile.*'''
+tags = ["redhat", "username", "containerfile"]
+
+[[rules]]
+id = "chpasswd-literal"
+description = "chpasswd fed a literal password instead of a build secret"
+regex = '''echo\s+["'][^\s"':$]+:(?!\$)[^\s"':]{3,}["']\s*\|\s*chpasswd'''
+tags = ["password"]
+
+# --------------------------------------------------------------------------
+# OpenShift / registry pull secrets
+# --------------------------------------------------------------------------
+
+[[rules]]
+id = "container-registry-authfile"
+description = "Container registry auth blob (pull secret / auth.json)"
+regex = '''"auths"\s*:\s*\{[^}]{0,4000}?"auth"\s*:\s*"[A-Za-z0-9+/=]{16,}"'''
+tags = ["pull-secret", "registry"]
+
+# --------------------------------------------------------------------------
+# Flight Control enrollment material
+# --------------------------------------------------------------------------
+
+[[rules]]
+id = "flightctl-enrollment-config"
+description = "Flight Control enrollment config with embedded client certificate data"
+regex = '''(?i)(client-certificate-data|client-key-data|enrollment-.{0,20}-data)\s*:\s*[A-Za-z0-9+/=]{40,}'''
+tags = ["flightctl", "certificate"]
+
+# --------------------------------------------------------------------------
+# Allowlist: documented placeholders and intentional demo defaults
+# --------------------------------------------------------------------------
+
+[[allowlists]]
+description = "Documentation placeholders and template markers"
+regexes = [
+  '''<INSERT PULL SECRET HERE>''',
+  '''FlightCtl_SERVER_(IP|HOSTNAME)''',
+  '''your-registry\.com''',
+  '''\$\{?[A-Z_][A-Z0-9_]*\}?''',
+  '''<[A-Z_]+>''',
+]
+
+[[allowlists]]
+description = "Documented local-only Flight Control demo credentials in the server bootstrap script"
+paths = ['''2_rhem-server-build-commands\.sh''']
+regexes = [
+  '''RHEM_ADMIN_(USER|PASSWD)=admin''',
+]
+
+[[allowlists]]
+description = "This config file describes secret shapes; it is not itself a secret"
+paths = ['''\.gitleaks\.toml''']

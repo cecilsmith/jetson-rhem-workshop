@@ -1,1 +1,19 @@
 .DS_Store
+
+# Credential and enrollment material — never commit these.
+# The secret-scan workflow fails the build if any of them become tracked.
+config.yaml
+pull-secret
+pull-secret.json
+auth.json
+.secrets/
+*.pem
+*.key
+*.p12
+.env
+
+# Local build output
+output/
+*.iso
+*.tar
+*.tar.zst

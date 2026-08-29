@@ -1,0 +1,98 @@
+# This version removes microshift.
+
+# Start with a standard RHEL Image Mode image for 9.4
+FROM registry.redhat.io/rhel9/rhel-bootc:9.4
+
+# The login account created on the device. Not secret, so a build arg is fine.
+ARG USERNAME=redhat
+
+# Register to Red Hat and enable the required base repositories.
+#
+# Credentials arrive as build SECRETS, never as build args: buildah records
+# --build-arg values in the image history, so a build arg would ship the
+# password inside the image and into any published tarball.
+#
+#   printf %s "$RH_USERNAME" > .secrets/rh_username   # mode 0600, gitignored
+#   printf %s "$RH_PASSWD"   > .secrets/rh_password
+#   printf %s "$USER_PASSWD" > .secrets/user_passwd
+#
+#   podman build \
+#     --secret id=rh_username,src=.secrets/rh_username \
+#     --secret id=rh_password,src=.secrets/rh_password \
+#     --secret id=user_passwd,src=.secrets/user_passwd \
+#     --build-arg USERNAME=redhat --squash \
+#     -t "${IMAGE_NAME}" -f <this file> .
+#
+RUN --mount=type=secret,id=rh_username --mount=type=secret,id=rh_password \
+    if [ ! -s /run/secrets/rh_username ] || [ ! -s /run/secrets/rh_password ] ; then \
+        echo "Build secrets rh_username and rh_password are mandatory" && exit 1 ; \
+    fi && \
+    subscription-manager register \
+        --username="$(cat /run/secrets/rh_username)" \
+        --password="$(cat /run/secrets/rh_password)" \
+        --auto-attach && \
+    subscription-manager repos --enable=rhel-9-for-aarch64-baseos-rpms && \
+    subscription-manager repos --enable=rhel-9-for-aarch64-appstream-rpms
+
+# Setup NVIDIA repositories
+RUN curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | tee /etc/yum.repos.d/nvidia-container-toolkit.repo
+RUN curl -s -L https://repo.download.nvidia.com/jetson/rhel-9.4/jp6.1/nvidia-l4t.repo | tee /etc/yum.repos.d/nvidia-l4t.repo
+
+# Setup NVIDIA Jetson Orin support packages
+RUN dnf -y install nvidia-jetpack-kmod nvidia-jetpack-all nvidia-container-toolkit &&\
+    dnf clean all
+
+# Prevent the kernel from being updated
+RUN echo "exclude=kernel* kmod-kvdo" >> /etc/yum.conf
+
+# Install firewalld
+RUN dnf install -y firewalld && \
+    dnf clean all
+
+# Create a default user with the specified password.
+# Add it to the 'wheel' group to allow for running sudo commands.
+RUN if [ -z "${USERNAME}" ] ; then \
+    echo USERNAME is a mandatory build argument && exit 1 ; \
+    fi
+RUN --mount=type=secret,id=user_passwd \
+    if [ ! -s /run/secrets/user_passwd ] ; then \
+        echo "Build secret user_passwd is mandatory" && exit 1 ; \
+    fi && \
+    useradd -m -d /var/home/$USERNAME -G wheel $USERNAME && \
+    echo "${USERNAME}:$(cat /run/secrets/user_passwd)" | chpasswd
+
+# Mandatory firewall configuration for microshift
+RUN firewall-offline-cmd --zone=public --add-port=22/tcp && \
+    firewall-offline-cmd --zone=trusted --add-source=10.42.0.0/16
+
+
+# Create a service to regenerate the cdi mappings for the NVIDIA Jetson Orin iGPU
+RUN cat > /usr/lib/systemd/system/nvidia-cdi.service <<EOF
+[Unit]
+Description=Generate the nvidia cdi yaml file
+Requires=multi-user.target
+After=multi-user.target
+[Service]
+Type=oneshot
+ExecStart=nvidia-ctk cdi generate --output=/etc/cdi/nvidia
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+RUN systemctl enable nvidia-cdi.service
+
+# Set the user to be in the video group to allow rootless use of the iGPU
+RUN usermod -a -G video $USERNAME
+
+# Install docker-compose binary. Do not install Docker.
+RUN dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo && \
+    dnf -y install docker-compose-plugin
+
+RUN dnf config-manager --add-repo https://rpm.flightctl.io/flightctl-epel.repo && \
+    dnf -y install flightctl-agent && \
+    dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm lorax && \
+    dnf -y clean all && \
+    systemctl enable flightctl-agent.service
+
+RUN subscription-manager unregister && \
+    subscription-manager clean

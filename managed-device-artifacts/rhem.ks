@@ -48,9 +48,9 @@ depmod -a
 bootc switch --mutate-in-place --transport registry ${IMAGE_NAME}
 
 # Create an OpenShift pull secret file for microshift
-cat > /etc/crio/openshift-pull-secret <<'EOF'
-<INSERT PULL SECRET HERE>
-EOF
-chmod 600 /etc/crio/openshift-pull-secret
+# cat > /etc/crio/openshift-pull-secret <<'EOF'
+# <INSERT PULL SECRET HERE>
+# EOF
+# chmod 600 /etc/crio/openshift-pull-secret
 
 %end
