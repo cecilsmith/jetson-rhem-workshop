@@ -17,8 +17,32 @@ tracked.
 | `REDHAT_REGISTRY_PASSWORD` | That service account's token.                                                                                                       | Same page → **Token** tab                                                   |
 | `RH_USERNAME`              | Red Hat Customer Portal login that `subscription-manager register` uses inside the build.                                           | Your Red Hat account                                                        |
 | `RH_PASSWD`                | That account's password.                                                                                                            | Your Red Hat account                                                        |
-| `DEVICE_USERNAME`          | Login account created on the device, e.g. `redhat`. Not strictly secret; kept here so the image contents aren't pinned in the repo. | You choose                                                                  |
-| `DEVICE_USER_PASSWD`       | Password for that device account. **This one is baked into the shipped image** — treat the released tarball accordingly.            | You choose                                                                  |
+
+## The device login is a variable, not a secret
+
+The account people log in with after flashing a device is **published on
+purpose** — a workshop attendee with a freshly flashed Jetson needs to be able to
+get in. It lives in repository *variables*, which are visible in the Actions UI
+and printed in both the job summary and the release notes:
+
+| Variable | Default | What it is |
+|---|---|---|
+| `DEVICE_USERNAME` | `redhat` | Login account created on the device, in the `wheel` group |
+| `DEVICE_USER_PASSWD` | `redhat` | That account's password |
+
+Both are optional. Leave them unset and the build uses the defaults above, which
+match the `ARG` defaults in the Containerfile.
+
+```bash
+gh variable set DEVICE_USERNAME    --body redhat --repo cecilsmith/jetson-rhem-workshop
+gh variable set DEVICE_USER_PASSWD --body redhat --repo cecilsmith/jetson-rhem-workshop
+```
+
+These are passed as ordinary `--build-arg` values, which is correct here for the
+same reason it is wrong for the Red Hat credentials: build args land in the image
+history, and here that history *is* the documentation. Anyone who can reach a
+flashed device can log into it, so change these before deploying a device
+anywhere outside a lab.
 
 ## Optional secrets
 <!-- 
@@ -52,8 +76,6 @@ gh secret set REDHAT_REGISTRY_USERNAME --repo cecilsmith/jetson-rhem-workshop
 gh secret set REDHAT_REGISTRY_PASSWORD --repo cecilsmith/jetson-rhem-workshop
 gh secret set RH_USERNAME              --repo cecilsmith/jetson-rhem-workshop
 gh secret set RH_PASSWD                --repo cecilsmith/jetson-rhem-workshop
-gh secret set DEVICE_USERNAME          --repo cecilsmith/jetson-rhem-workshop
-gh secret set DEVICE_USER_PASSWD       --repo cecilsmith/jetson-rhem-workshop
 ```
 
 Each prompts for the value on stdin, so it never lands in your shell history.
@@ -87,7 +109,27 @@ one appears.
 
 The build also runs with `--squash`, so the entitlement certificates that the
 final `subscription-manager clean` deletes are actually gone from the archive
-rather than merely whiteouted in a lower layer.
+rather than merely whiteouted in a lower layer. This is enforced, not assumed:
+
+1. The flag combination is probed against a throwaway build first, and the job
+   fails in seconds if podman rejects it.
+2. After the build, the layer count is compared against the base image to prove
+   `--squash` took effect.
+3. The release step refuses to publish unless that assertion passed and, on a
+   non-private repository, refuses outright when it did not.
+
+## Keep the build cache private
+
+`--cache-to` exports the **intermediate** layers to
+`ghcr.io/<owner>/<repo>/buildcache`, including the layer created immediately
+after `subscription-manager register` — entitlement certificates intact.
+`--squash` does nothing about this, because the cache is written before the
+final image is committed.
+
+The build asserts the cache is not anonymously readable and fails if it is. If
+that check ever fires: set the package to private under
+**your profile → Packages → buildcache → Package settings**, then re-register
+the affected system so the exposed entitlement is rotated.
 
 ## Operational notes
 

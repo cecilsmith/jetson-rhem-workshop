@@ -38,7 +38,9 @@ on:
     paths:
       - "ContainerFile-*"
       - "managed-device-artifacts/ContainerFile-*"
-      - ".github/workflows/build-jetson-image.yml"
+      # Deliberately NOT triggered by edits to this workflow file: iterating on
+      # CI would otherwise kick off a multi-hour build and cut a release on
+      # every commit. Use workflow_dispatch to test changes here.
 
 permissions:
   contents: write   # create the release
@@ -63,14 +65,17 @@ jobs:
           REDHAT_REGISTRY_PASSWORD: ${{ secrets.REDHAT_REGISTRY_PASSWORD }}
           RH_USERNAME: ${{ secrets.RH_USERNAME }}
           RH_PASSWD: ${{ secrets.RH_PASSWD }}
-          DEVICE_USERNAME: ${{ secrets.DEVICE_USERNAME }}
-          DEVICE_USER_PASSWD: ${{ secrets.DEVICE_USER_PASSWD }}
           OCP_PULL_SECRET: ${{ secrets.OCP_PULL_SECRET }}
+          DEVICE_USERNAME: ${{ vars.DEVICE_USERNAME || 'redhat' }}
+          DEVICE_USER_PASSWD: ${{ vars.DEVICE_USER_PASSWD || 'redhat' }}
         run: |
           set -uo pipefail
+          # The device login is deliberately PUBLIC so workshop attendees can log
+          # in to a freshly flashed device, so it lives in repository *variables*
+          # rather than secrets and is not checked for here.
           missing=()
           for name in REDHAT_REGISTRY_USERNAME REDHAT_REGISTRY_PASSWORD \
-                      RH_USERNAME RH_PASSWD DEVICE_USERNAME DEVICE_USER_PASSWD; do
+                      RH_USERNAME RH_PASSWD; do
             if [ -z "${!name:-}" ]; then missing+=("$name"); fi
           done
 
@@ -78,9 +83,13 @@ jobs:
             echo "### Required secrets"
             echo
             for name in REDHAT_REGISTRY_USERNAME REDHAT_REGISTRY_PASSWORD \
-                        RH_USERNAME RH_PASSWD DEVICE_USERNAME DEVICE_USER_PASSWD; do
+                        RH_USERNAME RH_PASSWD; do
               if [ -n "${!name:-}" ]; then echo "- \`$name\` — set"; else echo "- \`$name\` — **MISSING**"; fi
             done
+            echo
+            echo "### Device login (public, baked into the image)"
+            echo
+            echo "- username \`${DEVICE_USERNAME}\` / password \`${DEVICE_USER_PASSWD}\`"
             echo
             echo "### Optional secrets"
             if [ -n "${OCP_PULL_SECRET:-}" ]; then
@@ -95,6 +104,21 @@ jobs:
             exit 1
           fi
           echo "All required secrets are configured."
+
+      # Catch the unpublishable combination here rather than after a multi-hour
+      # build: without --squash the archive retains recoverable entitlement
+      # certificates, and a release on a non-private repository is public.
+      - name: Refuse an unpublishable release up front
+        if: github.event_name == 'workflow_dispatch' && inputs.squash == false && inputs.publish_release
+        env:
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -uo pipefail
+          if [ "${REPO_VISIBILITY}" != "private" ]; then
+            echo "::error::squash=false with publish_release=true on a ${REPO_VISIBILITY} repository would publish Red Hat entitlement certificates."
+            echo "::error::Set publish_release=false and use push_to_ghcr with a private package instead."
+            exit 1
+          fi
 
   build:
     name: Build on native ARM64
@@ -122,15 +146,23 @@ jobs:
           sudo apt-get clean || true
           echo "After:"; df -h /
 
-      - name: Install podman and tooling
+      # Do NOT apt-install podman here. ubuntu-24.04-arm already ships podman,
+      # buildah, skopeo, zstd, jq and gh. Installing the Ubuntu podman package
+      # on top leaves two podman versions on the box plus a /dev/shm/libpod_lock
+      # segment sized for the other one, and every later podman call dies with:
+      #   failed to open 2048 locks in /libpod_lock: numerical result out of range
+      - name: Check container tooling
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends podman zstd jq
+          # Clear any stale SHM lock segment before the first podman call.
+          sudo rm -f /dev/shm/libpod_lock /dev/shm/libpod_rootless_lock_* || true
+          for tool in podman skopeo zstd jq gh; do
+            printf '%-8s %s\n' "$tool" "$(command -v "$tool" || echo MISSING)"
+          done
           podman version
           # Rootful podman: the bootc base image layers are large and root
           # storage avoids fuse-overlayfs overhead on the hosted runner.
-          sudo podman info --format '{{.Store.GraphDriverName}}'
+          sudo podman info --format 'driver={{.Store.GraphDriverName}} root={{.Store.GraphRoot}}'
 
       - name: Resolve Containerfile and derive image name
         id: resolve
@@ -211,26 +243,49 @@ jobs:
             | sudo podman login ghcr.io \
                 --username "${{ github.actor }}" --password-stdin
 
+      # The layer cache is a second, independent disclosure path that --squash
+      # does nothing about: --cache-to exports the INTERMEDIATE layers, including
+      # the one created right after `subscription-manager register`, with the
+      # entitlement certificates fully intact. If that package is publicly
+      # readable, those certs are public no matter how the final image is built.
+      - name: Assert the build cache is not publicly readable
+        run: |
+          set -uo pipefail
+          repo_lc="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          pkg="${repo_lc}/buildcache"
+
+          # Anonymous pull attempt. Succeeding means anyone on the internet can
+          # read the cached layers.
+          tok="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${pkg}:pull" \
+                 2>/dev/null | jq -r '.token // empty')"
+          if [ -n "$tok" ] && curl -fsS -o /dev/null \
+               -H "Authorization: Bearer ${tok}" \
+               "https://ghcr.io/v2/${pkg}/tags/list" 2>/dev/null; then
+            echo "::error::The build cache package ghcr.io/${pkg} is PUBLICLY READABLE."
+            echo "::error::It contains pre-cleanup layers holding Red Hat entitlement certificates. Set the package to private at https://github.com/users/${{ github.repository_owner }}/packages/container/package/buildcache/settings and rotate the entitlement by re-registering the system."
+            exit 1
+          fi
+          echo "Build cache is not anonymously readable (private, or not created yet)."
+
       - name: Stage build secrets
         id: secrets
         env:
           RH_USERNAME: ${{ secrets.RH_USERNAME }}
           RH_PASSWD: ${{ secrets.RH_PASSWD }}
-          DEVICE_USER_PASSWD: ${{ secrets.DEVICE_USER_PASSWD }}
           OCP_PULL_SECRET: ${{ secrets.OCP_PULL_SECRET }}
         run: |
           set -euo pipefail
-          # Secrets go to files under RUNNER_TEMP (outside the build context) and
-          # are mounted with --secret, so their values never land in image
-          # history. Never pass these as --build-arg: buildah records build-arg
-          # values in the image config, which would publish them in the release
-          # tarball.
+          # Genuinely secret values go to files under RUNNER_TEMP (outside the
+          # build context) and are mounted with --secret, so they never land in
+          # image history. Never pass these as --build-arg: buildah records
+          # build-arg values in the image config, which would publish them in
+          # the release tarball. (The device login is intentionally public and
+          # is passed as a plain --build-arg.)
           dir="${RUNNER_TEMP}/build-secrets"
           mkdir -p "$dir"; chmod 700 "$dir"
           umask 077
           printf '%s' "$RH_USERNAME"        > "$dir/rh_username"
           printf '%s' "$RH_PASSWD"          > "$dir/rh_password"
-          printf '%s' "$DEVICE_USER_PASSWD" > "$dir/user_passwd"
           if [ -n "${OCP_PULL_SECRET:-}" ]; then
             printf '%s' "$OCP_PULL_SECRET"  > "$dir/pullsecret"
           fi
@@ -242,7 +297,8 @@ jobs:
           CONTAINERFILE: ${{ steps.resolve.outputs.containerfile }}
           IMAGE_REF: ${{ steps.resolve.outputs.image_ref }}
           SECRET_DIR: ${{ steps.secrets.outputs.dir }}
-          DEVICE_USERNAME: ${{ secrets.DEVICE_USERNAME }}
+          DEVICE_USERNAME: ${{ vars.DEVICE_USERNAME || 'redhat' }}
+          DEVICE_USER_PASSWD: ${{ vars.DEVICE_USER_PASSWD || 'redhat' }}
           # Note: `A && B || C` yields C whenever B is falsy, so test for the
           # false case explicitly rather than passing inputs.squash through.
           SQUASH: ${{ (github.event_name == 'workflow_dispatch' && inputs.squash == false) && 'false' || 'true' }}
@@ -279,6 +335,31 @@ jobs:
           squash_flag=()
           if [ "${SQUASH}" != "false" ]; then squash_flag=( --squash ); fi
 
+          # Validate the flag combination against a throwaway scratch build, so
+          # an incompatibility surfaces in seconds rather than after a
+          # multi-hour build. No network or base image needed.
+          #
+          # This is a HARD failure, not a warning. This repository is public, so
+          # a release asset is public, and without --squash the archive carries
+          # recoverable Red Hat entitlement certificates. Failing here costs
+          # seconds; degrading quietly costs a credential disclosure.
+          probe="${RUNNER_TEMP}/flagprobe"
+          mkdir -p "$probe"
+          echo probe > "$probe/probe.txt"
+          printf 'FROM scratch\nCOPY probe.txt /probe.txt\n' > "$probe/Containerfile"
+          if ! sudo podman build --layers "${squash_flag[@]}" \
+                 -t localhost/flagprobe:tmp \
+                 -f "$probe/Containerfile" "$probe" >/dev/null 2>&1; then
+            if [ "${SQUASH}" = "false" ]; then
+              echo "::error::Probe build failed even with --squash disabled; podman itself is broken on this runner."
+            else
+              echo "::error::podman rejected '--layers --squash'. Not continuing: without --squash the saved archive retains Red Hat entitlement certificates in a lower layer, and this repository is public."
+              echo "::error::Either fix the flag combination, or re-run with squash=false AND publish_release=false to build an image for a private registry only."
+            fi
+            exit 1
+          fi
+          sudo podman rmi -f localhost/flagprobe:tmp >/dev/null 2>&1 || true
+
           args=(
             build
             --platform linux/arm64
@@ -287,14 +368,18 @@ jobs:
             "${cache_flags[@]}"
             --secret "id=rh_username,src=${SECRET_DIR}/rh_username"
             --secret "id=rh_password,src=${SECRET_DIR}/rh_password"
-            --secret "id=user_passwd,src=${SECRET_DIR}/user_passwd"
+            # Device login: deliberately public so anyone flashing the image can
+            # log in. Build args are fine precisely because they DO end up in the
+            # image history — that is the documentation.
             --build-arg "USERNAME=${DEVICE_USERNAME}"
+            --build-arg "USER_PASSWD=${DEVICE_USER_PASSWD}"
             -t "${IMAGE_REF}"
             -f "${CONTAINERFILE}"
           )
           if [ -f "${SECRET_DIR}/pullsecret" ]; then
-            args+=( --secret "id=pullsecret,src=${SECRET_DIR}/pullsecret"
-                    --authfile "${SECRET_DIR}/pullsecret" )
+            # Secret mount only. Do NOT also pass --authfile: that would replace
+            # the registry.redhat.io login above and break the base image pull.
+            args+=( --secret "id=pullsecret,src=${SECRET_DIR}/pullsecret" )
           fi
           args+=( . )
 
@@ -309,11 +394,13 @@ jobs:
           rm -rf "${RUNNER_TEMP}/build-secrets" || true
 
       - name: Verify no credentials leaked into the image
+        id: verify
         env:
           IMAGE_REF: ${{ steps.resolve.outputs.image_ref }}
+          CONTAINERFILE: ${{ steps.resolve.outputs.containerfile }}
           RH_USERNAME: ${{ secrets.RH_USERNAME }}
           RH_PASSWD: ${{ secrets.RH_PASSWD }}
-          DEVICE_USER_PASSWD: ${{ secrets.DEVICE_USER_PASSWD }}
+          SQUASH: ${{ (github.event_name == 'workflow_dispatch' && inputs.squash == false) && 'false' || 'true' }}
         run: |
           set -uo pipefail
           fail=0
@@ -321,7 +408,9 @@ jobs:
           meta="$(sudo podman history --no-trunc --format '{{.CreatedBy}}' "$IMAGE_REF"; \
                   sudo podman inspect --format '{{json .Config}}' "$IMAGE_REF")"
 
-          for name in RH_USERNAME RH_PASSWD DEVICE_USER_PASSWD; do
+          # Only the Red Hat subscription credentials are checked. The device
+          # login is intentionally present in the image history.
+          for name in RH_USERNAME RH_PASSWD; do
             value="${!name}"
             [ -n "$value" ] || continue
             if printf '%s' "$meta" | grep -qF -- "$value"; then
@@ -330,13 +419,43 @@ jobs:
             fi
           done
 
-          # Entitlement certificates must not ship inside the image.
+          # Entitlement certificates must not be visible in the merged filesystem.
+          # NOTE: this only proves they are absent from the TOP of the stack. A
+          # file deleted in the final layer is still recoverable from the layer
+          # below it, which is what the squash assertion below covers.
           leftovers="$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE_REF" -c \
             'ls -A /etc/pki/entitlement /etc/pki/consumer 2>/dev/null' || true)"
           if [ -n "$leftovers" ]; then
             echo "::error::Red Hat entitlement certificates remain in the image. Ensure the Containerfile ends with: subscription-manager unregister && subscription-manager clean"
             fail=1
           fi
+
+          # Assert that --squash actually took effect, rather than trusting that
+          # the flag was accepted. If it did, every layer this Containerfile adds
+          # has been collapsed into exactly one, so the pre-`clean` layer that
+          # held the entitlement certs no longer exists in the archive.
+          #
+          # buildah has used both semantics (collapse everything vs collapse only
+          # the new layers), so accept either shape.
+          base="$(grep -iE '^[[:space:]]*FROM[[:space:]]' "$CONTAINERFILE" | head -1 | awk '{print $2}')"
+          n="$(sudo podman image inspect "$IMAGE_REF" --format '{{len .RootFS.Layers}}' 2>/dev/null || echo 0)"
+          b="$(sudo podman image inspect "$base" --format '{{len .RootFS.Layers}}' 2>/dev/null || echo 0)"
+          echo "Layers: image=${n} base=${b} (base ${base})"
+
+          publishable=false
+          if [ "$n" = "1" ] || { [ "$b" != "0" ] && [ "$n" = "$((b + 1))" ]; }; then
+            echo "Squash confirmed: this Containerfile contributes a single layer."
+            publishable=true
+          elif [ "${SQUASH}" = "false" ]; then
+            # Deliberately disabled by the operator. Not an error, but the
+            # archive is not fit for public release; the publish step enforces it.
+            echo "::warning::Built without --squash by request. Entitlement certificates remain recoverable from a lower layer, so this archive will NOT be published as a release. Push it to a private registry instead."
+          else
+            echo "::error::--squash was requested but did not take effect (image has ${n} layers over a ${b}-layer base)."
+            echo "::error::Entitlement certificates deleted by 'subscription-manager clean' are still recoverable from a lower layer, so this archive MUST NOT be published on a public repository."
+            fail=1
+          fi
+          echo "publishable=${publishable}" >> "$GITHUB_OUTPUT"
 
           [ "$fail" -eq 0 ] && echo "No credential material found in image metadata or entitlement paths."
           exit $fail
@@ -428,6 +547,8 @@ jobs:
           SPLIT: ${{ steps.package.outputs.split }}
           OUT: ${{ steps.package.outputs.dir }}
           STEM: ${{ steps.package.outputs.stem }}
+          DEVICE_USERNAME: ${{ vars.DEVICE_USERNAME || 'redhat' }}
+          DEVICE_USER_PASSWD: ${{ vars.DEVICE_USER_PASSWD || 'redhat' }}
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/NOTES.md"
@@ -440,6 +561,18 @@ jobs:
             echo "| Containerfile | \`${CONTAINERFILE_LINK}\` |"
             echo "| flightctl-agent | \`${AGENT_VERSION}\` |"
             echo "| Built from | \`${GITHUB_SHA}\` |"
+            echo
+            echo "## Logging in"
+            echo
+            echo "Once a device is flashed, log in over SSH or the console with:"
+            echo
+            echo "| Username | Password |"
+            echo "|---|---|"
+            echo "| \`${DEVICE_USERNAME}\` | \`${DEVICE_USER_PASSWD}\` |"
+            echo
+            echo "The account is in the \`wheel\` group, so it can \`sudo\`. These"
+            echo "credentials are published deliberately for workshop use — change"
+            echo "them before deploying a device anywhere that matters."
             echo
             echo "## Load the image"
             echo
@@ -464,7 +597,7 @@ jobs:
             echo
             echo "> The image contains no Red Hat subscription credentials: it is registered with"
             echo "> \`--mount=type=secret\` at build time and unregistered before the final layer."
-            echo "> It **does** contain the device login account baked in at build time."
+            echo "> The device login above **is** baked in, by design."
           } > "$notes"
           echo "path=$notes" >> "$GITHUB_OUTPUT"
           cat "$notes" >> "$GITHUB_STEP_SUMMARY"
@@ -477,8 +610,20 @@ jobs:
           IMAGE_NAME: ${{ steps.resolve.outputs.image_name }}
           OUT: ${{ steps.package.outputs.dir }}
           NOTES: ${{ steps.notes.outputs.path }}
+          PUBLISHABLE: ${{ steps.verify.outputs.publishable }}
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
           set -euo pipefail
+
+          # A release on a public repository is public: there is no private
+          # release asset. Refuse to create one unless the squash assertion
+          # confirmed the archive carries no recoverable entitlement certs.
+          if [ "${PUBLISHABLE}" != "true" ] && [ "${REPO_VISIBILITY}" != "private" ]; then
+            echo "::error::Refusing to publish a release from a ${REPO_VISIBILITY} repository: the squash guarantee did not hold, so the archive may contain recoverable Red Hat entitlement certificates."
+            echo "::error::Push the image to a private registry instead (push_to_ghcr, with the package set to private), or re-run once --squash works."
+            exit 1
+          fi
+
           if gh release view "$DATE_TAG" >/dev/null 2>&1; then
             echo "Release $DATE_TAG exists; updating notes and replacing assets."
             gh release edit "$DATE_TAG" --notes-file "$NOTES" --title "${IMAGE_NAME} ${DATE_TAG}"

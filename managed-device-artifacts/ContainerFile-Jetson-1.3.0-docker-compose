@@ -3,8 +3,15 @@
 # Start with a standard RHEL Image Mode image for 9.4
 FROM registry.redhat.io/rhel9/rhel-bootc:9.4
 
-# The login account created on the device. Not secret, so a build arg is fine.
+# The login account created on the device.
+#
+# These are PUBLIC on purpose: anyone flashing this image needs to be able to
+# log in. Build args are the right mechanism precisely because their values are
+# recorded in the image history. Override at build time with
+# --build-arg, or change the DEVICE_USERNAME / DEVICE_USER_PASSWD repository
+# variables in CI. Change them before deploying a device anywhere that matters.
 ARG USERNAME=redhat
+ARG USER_PASSWD=redhat
 
 # Register to Red Hat and enable the required base repositories.
 #
@@ -12,16 +19,15 @@ ARG USERNAME=redhat
 # --build-arg values in the image history, so a build arg would ship the
 # password inside the image and into any published tarball.
 #
-#   printf %s "$RH_USERNAME" > .secrets/rh_username   # mode 0600, gitignored
+#   mkdir -p .secrets && chmod 700 .secrets      # .secrets/ is gitignored
+#   printf %s "$RH_USERNAME" > .secrets/rh_username
 #   printf %s "$RH_PASSWD"   > .secrets/rh_password
-#   printf %s "$USER_PASSWD" > .secrets/user_passwd
 #
 #   podman build \
 #     --secret id=rh_username,src=.secrets/rh_username \
 #     --secret id=rh_password,src=.secrets/rh_password \
-#     --secret id=user_passwd,src=.secrets/user_passwd \
-#     --build-arg USERNAME=redhat --squash \
-#     -t "${IMAGE_NAME}" -f <this file> .
+#     --build-arg USERNAME=redhat --build-arg USER_PASSWD=redhat \
+#     --squash -t "${IMAGE_NAME}" -f <this file> .
 #
 RUN --mount=type=secret,id=rh_username --mount=type=secret,id=rh_password \
     if [ ! -s /run/secrets/rh_username ] || [ ! -s /run/secrets/rh_password ] ; then \
@@ -54,12 +60,11 @@ RUN dnf install -y firewalld && \
 RUN if [ -z "${USERNAME}" ] ; then \
     echo USERNAME is a mandatory build argument && exit 1 ; \
     fi
-RUN --mount=type=secret,id=user_passwd \
-    if [ ! -s /run/secrets/user_passwd ] ; then \
-        echo "Build secret user_passwd is mandatory" && exit 1 ; \
-    fi && \
-    useradd -m -d /var/home/$USERNAME -G wheel $USERNAME && \
-    echo "${USERNAME}:$(cat /run/secrets/user_passwd)" | chpasswd
+RUN if [ -z "${USER_PASSWD}" ] ; then \
+    echo USER_PASSWD is a mandatory build argument && exit 1 ; \
+    fi
+RUN useradd -m -d /var/home/$USERNAME -G wheel $USERNAME && \
+    echo "${USERNAME}:${USER_PASSWD}" | chpasswd
 
 # Mandatory firewall configuration for microshift
 RUN firewall-offline-cmd --zone=public --add-port=22/tcp && \

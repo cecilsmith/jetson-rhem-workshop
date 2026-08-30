@@ -14,30 +14,35 @@ useDefault = true
 # Red Hat subscription-manager credentials
 # --------------------------------------------------------------------------
 
+# NOTE: gitleaks compiles these with RE2, which has NO lookaround support.
+# A `(?!...)` here does not fail gracefully — it panics the whole scan at
+# config-load time. Express "not followed by X" as a negated character class
+# instead, e.g. `[^\s"'$]` for "not a shell variable reference".
+
 [[rules]]
 id = "rh-subscription-manager-password"
 description = "subscription-manager invoked with a literal password"
-regex = '''subscription-manager[^\n]{0,200}?--password[= ]+["']?(?!\$)([^\s"']{4,})'''
+regex = '''subscription-manager[^\n]{0,200}?--password[= ]+["']?[^\s"'$][^\s"']{3,}'''
 tags = ["redhat", "password"]
 
 [[rules]]
 id = "rh-containerfile-arg-password"
 description = "Containerfile ARG with a hardcoded password/credential default"
-regex = '''(?i)^\s*ARG\s+(RH_PASSWD|RH_PASSWORD|USER_PASSWD|USER_PASSWORD|ROOT_PASSWD|REGISTRY_PASSWORD)\s*=\s*["']?([^\s"'#]+)'''
+regex = '''(?im)^\s*ARG\s+(RH_PASSWD|RH_PASSWORD|ROOT_PASSWD|REGISTRY_PASSWORD)\s*=\s*["']?([^\s"'#]+)'''
 path = '''(?i)containerfile.*'''
 tags = ["redhat", "password", "containerfile"]
 
 [[rules]]
 id = "rh-containerfile-arg-username"
 description = "Containerfile ARG with a hardcoded Red Hat account username"
-regex = '''(?i)^\s*ARG\s+(RH_USERNAME|RH_USER|REGISTRY_USERNAME)\s*=\s*["']?([^\s"'#]+)'''
+regex = '''(?im)^\s*ARG\s+(RH_USERNAME|RH_USER|REGISTRY_USERNAME)\s*=\s*["']?([^\s"'#]+)'''
 path = '''(?i)containerfile.*'''
 tags = ["redhat", "username", "containerfile"]
 
 [[rules]]
 id = "chpasswd-literal"
-description = "chpasswd fed a literal password instead of a build secret"
-regex = '''echo\s+["'][^\s"':$]+:(?!\$)[^\s"':]{3,}["']\s*\|\s*chpasswd'''
+description = "chpasswd fed a literal password instead of a build arg or secret"
+regex = '''echo\s+["'][^\s"':$]+:[^\s"':$][^\s"':]{2,}["']\s*\|\s*chpasswd'''
 tags = ["password"]
 
 # --------------------------------------------------------------------------
@@ -79,6 +84,17 @@ description = "Documented local-only Flight Control demo credentials in the serv
 paths = ['''2_rhem-server-build-commands\.sh''']
 regexes = [
   '''RHEM_ADMIN_(USER|PASSWD)=admin''',
+]
+
+[[allowlists]]
+description = """
+The managed-device login is published on purpose so workshop attendees can log
+in to a freshly flashed device. It is set via the USERNAME / USER_PASSWD build
+args and the DEVICE_USERNAME / DEVICE_USER_PASSWD repository variables.
+"""
+regexes = [
+  '''(?i)ARG\s+(USERNAME|USER_PASSWD)\s*=''',
+  '''(?i)DEVICE_(USERNAME|USER_PASSWD)''',
 ]
 
 [[allowlists]]
