@@ -6,8 +6,7 @@ repository secrets — nothing credential-bearing lives in the repo.
 
 `.github/workflows/secret-scan.yml` is the other half: it scans the full git
 history (gitleaks, `.gitleaks.toml`) and the tracked tree for credentials that
-slipped in, and fails if a file like `config.yaml` or `pull-secret` ever becomes
-tracked.
+slipped in, and fails if a file like `config.yaml` ever becomes tracked.
 
 ## Required secrets
 
@@ -44,12 +43,6 @@ history, and here that history *is* the documentation. Anyone who can reach a
 flashed device can log into it, so change these before deploying a device
 anywhere outside a lab.
 
-## Optional secrets
-<!-- 
-| Secret            | When you need it                                                                                                                                                                                                                                                                        |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OCP_PULL_SECRET` | Only for the MicroShift Containerfiles (`ContainerFile-Jetson-1.0.2-base`), which pre-pull OpenShift release images. Download from <https://console.redhat.com/openshift/install/pull-secret> and paste the whole JSON blob. Not needed by `ContainerFile-Jetson-1.3.0-docker-compose`. | --> |
-
 `GITHUB_TOKEN` is provided automatically — you do not create it. It is used to
 push the layer cache to `ghcr.io` and to create the release.
 
@@ -79,12 +72,6 @@ gh secret set RH_PASSWD                --repo cecilsmith/jetson-rhem-workshop
 ```
 
 Each prompts for the value on stdin, so it never lands in your shell history.
-For the multi-line pull secret, read it from the file instead:
-
-```bash
-gh secret set OCP_PULL_SECRET --repo cecilsmith/jetson-rhem-workshop < ./pull-secret
-```
-
 Verify (names and update times only — values are never readable back):
 
 ```bash

@@ -65,7 +65,6 @@ jobs:
           REDHAT_REGISTRY_PASSWORD: ${{ secrets.REDHAT_REGISTRY_PASSWORD }}
           RH_USERNAME: ${{ secrets.RH_USERNAME }}
           RH_PASSWD: ${{ secrets.RH_PASSWD }}
-          OCP_PULL_SECRET: ${{ secrets.OCP_PULL_SECRET }}
           DEVICE_USERNAME: ${{ vars.DEVICE_USERNAME || 'redhat' }}
           DEVICE_USER_PASSWD: ${{ vars.DEVICE_USER_PASSWD || 'redhat' }}
         run: |
@@ -90,13 +89,6 @@ jobs:
             echo "### Device login (public, baked into the image)"
             echo
             echo "- username \`${DEVICE_USERNAME}\` / password \`${DEVICE_USER_PASSWD}\`"
-            echo
-            echo "### Optional secrets"
-            if [ -n "${OCP_PULL_SECRET:-}" ]; then
-              echo "- \`OCP_PULL_SECRET\` — set (needed only by the MicroShift Containerfiles)"
-            else
-              echo "- \`OCP_PULL_SECRET\` — not set (fine unless you build a MicroShift Containerfile)"
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ ${#missing[@]} -gt 0 ]; then
@@ -284,7 +276,6 @@ jobs:
         env:
           RH_USERNAME: ${{ secrets.RH_USERNAME }}
           RH_PASSWD: ${{ secrets.RH_PASSWD }}
-          OCP_PULL_SECRET: ${{ secrets.OCP_PULL_SECRET }}
         run: |
           set -euo pipefail
           # Genuinely secret values go to files under RUNNER_TEMP (outside the
@@ -298,9 +289,6 @@ jobs:
           umask 077
           printf '%s' "$RH_USERNAME"        > "$dir/rh_username"
           printf '%s' "$RH_PASSWD"          > "$dir/rh_password"
-          if [ -n "${OCP_PULL_SECRET:-}" ]; then
-            printf '%s' "$OCP_PULL_SECRET"  > "$dir/pullsecret"
-          fi
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Build image (native arm64, registry layer cache)
@@ -320,8 +308,8 @@ jobs:
           # Registry-backed layer cache. The Actions cache is capped at 10 GB
           # per repo, which a RHEL bootc image with nvidia-jetpack blows past on
           # its own, so the cache lives in ghcr.io instead. Public-repo GHCR
-          # storage is free, and the expensive layers (jetpack, MicroShift) then
-          # survive across runs.
+          # storage is free, and the expensive jetpack layers then survive
+          # across runs.
           repo_lc="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           cache_repo="ghcr.io/${repo_lc}/buildcache"
 
@@ -388,11 +376,6 @@ jobs:
             -t "${IMAGE_REF}"
             -f "${CONTAINERFILE}"
           )
-          if [ -f "${SECRET_DIR}/pullsecret" ]; then
-            # Secret mount only. Do NOT also pass --authfile: that would replace
-            # the registry.redhat.io login above and break the base image pull.
-            args+=( --secret "id=pullsecret,src=${SECRET_DIR}/pullsecret" )
-          fi
           args+=( . )
 
           sudo podman "${args[@]}"

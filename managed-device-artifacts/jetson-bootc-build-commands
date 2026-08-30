@@ -1,20 +1,30 @@
-# Download pull secret for microshift: https://console.redhat.com/openshift/install/pull-secret and place it in the build directory as pull-secret
-# Pull secret should also be pasted into the kickstart file where indicated
-# For simplicity, these commands should be run after sudo su - root.  Make sure to log into registry.redhat.io after sudoing.
-# This is not currently intended as a script to run, more of a command reference.
+# Command reference for producing a bootable Jetson Orin ISO.
 #
+# This is a reference, not a script to run top to bottom.
+#
+# Two ways to get the container image:
+#   Option 1 - download the image CI already built (skip to "Load a released image")
+#   Option 2 - build it yourself on an aarch64 host
+#
+# Either way, the ISO step must run on aarch64 hardware: bootc-image-builder
+# runs the image it is packaging.
+#
+# For simplicity these commands assume root (sudo su - root).
 
-# Install mkksiso
+
+############################################################################
+# Prerequisites
+############################################################################
+
+# mkksiso comes from lorax
 dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm lorax
 
+# Needed to pull the RHEL bootc base image and the image builder.
 podman login registry.redhat.io
 
-# If applicable--likely not if using local registry
-# podman login your-registry.com
-
-# If using local registry, make sure to add it as an insecure registry in 
-#   /etc/containers/registries.conf.d/999-local-registry.conf and restart the podman service
-# For example, if your local registry is at $HOSTIP:5000, the file would look like this:
+# If you are pushing to the local registry created by
+# 1_configure-firewall-and-registry.sh, declare it insecure and restart podman.
+# Replace $HOSTIP with the address of the machine running the registry.
 cat > /etc/containers/registries.conf.d/999-local-registry.conf <<EOF
 [[registry]]
 location = "$HOSTIP:5000"
@@ -22,19 +32,101 @@ insecure = true
 EOF
 
 
-# Modify per your environment
+############################################################################
+# Option 1: Load a released image
+############################################################################
 
-export IMAGE_NAME=your-registry.com:tag 
-export USER_PASSWORD=password
-export PULL_SECRET=./pull-secret # TODO: include instructions for this if necessary
+# Grab the .tar.zst asset and SHA256SUMS from the repository's Releases page.
+# Ignore "Source code (zip)" and "Source code (tar.gz)" - GitHub attaches those
+# to every release automatically; they are the repo, not the image.
+
+export DATE_TAG=2026-08-30    # the release tag
+export IMAGE_NAME=localhost/jetson-flightctl-1.3.0-docker-compose:${DATE_TAG}
+export STEM=jetson-flightctl-1.3.0-docker-compose-${DATE_TAG}
+
+sha256sum -c SHA256SUMS
+
+# If the release was split because it exceeded the 2 GiB asset limit, join the
+# parts first:
+#   cat ${STEM}.tar.zst.part* > ${STEM}.tar.zst
+
+zstd -d ${STEM}.tar.zst -o ${STEM}.tar
+podman load -i ${STEM}.tar
+
+# Now skip to "Build the ISO".
+
+
+############################################################################
+# Option 2: Build the image yourself
+############################################################################
+
+# Red Hat credentials are passed as build SECRETS, never as --build-arg.
+# podman records build-arg values in the image history, so a build arg would
+# ship your Red Hat password inside the image itself.
+mkdir -p .secrets && chmod 700 .secrets
+printf %s 'YOUR_REDHAT_LOGIN'    > .secrets/rh_username
+printf %s 'YOUR_REDHAT_PASSWORD' > .secrets/rh_password
+chmod 600 .secrets/*
+
+# The device login is public on purpose so anyone flashing the image can log in.
+# Change it before deploying a device anywhere outside a lab.
+export DEVICE_USERNAME=redhat
+export DEVICE_PASSWORD=redhat
+
+export DATE_TAG=$(date -u +%Y-%m-%d)
+export IMAGE_NAME=localhost/jetson-flightctl-1.3.0-docker-compose:${DATE_TAG}
+export CONTAINER_FILE=./ContainerFile-Jetson-1.3.0-docker-compose
+
+# --squash collapses every layer this Containerfile adds into one. Without it,
+# the entitlement certificates that the final `subscription-manager clean`
+# deletes are only whiteouted - the real files stay readable in the layer
+# underneath and would ship with the image.
+podman build \
+  --secret id=rh_username,src=.secrets/rh_username \
+  --secret id=rh_password,src=.secrets/rh_password \
+  --build-arg USERNAME="${DEVICE_USERNAME}" \
+  --build-arg USER_PASSWD="${DEVICE_PASSWORD}" \
+  --squash \
+  -t "${IMAGE_NAME}" \
+  -f "${CONTAINER_FILE}" \
+  .
+
+# Sanity checks before shipping the image:
+#   no entitlement material left behind
+podman run --rm --entrypoint /bin/sh "${IMAGE_NAME}" -c \
+  'ls -A /etc/pki/entitlement ; ls -A /etc/pki/consumer'
+#   squash took effect (should be exactly one more layer than the base image)
+podman image inspect "${IMAGE_NAME}" --format '{{len .RootFS.Layers}}'
+podman image inspect registry.redhat.io/rhel9/rhel-bootc:9.4 --format '{{len .RootFS.Layers}}'
+#   which compose provider ended up in the image
+podman run --rm --entrypoint /bin/sh "${IMAGE_NAME}" -c 'podman compose version'
+
+
+############################################################################
+# Build the ISO  (must run on aarch64)
+############################################################################
+
 export KICKSTART=./rhem.ks
-# Options are ContainerFile-Jetson-rhem-1.0.2-base or ContainerFile-Jetson-rhem-1.0.2-with-config
-export CONTAINER_FILE=./ContainerFile-Jetson-rhem-1.0.2-base
 
-mkdir ./output
+mkdir -p ./output
 
-podman build --authfile "${PULL_SECRET}" -t "${IMAGE_NAME}" --secret "id=pullsecret,src=${PULL_SECRET}"  --build-arg USER_PASSWD="${USER_PASSWORD}" -f ${CONTAINER_FILE}
-
-podman run --rm -it     --privileged     --security-opt label=type:unconfined_t     -v /var/lib/containers/storage:/var/lib/containers/storage     -v ./output:/output     registry.redhat.io/rhel9/bootc-image-builder:9.4     --local     --type iso ${IMAGE_NAME}
+podman run --rm -it \
+  --privileged \
+  --security-opt label=type:unconfined_t \
+  -v /var/lib/containers/storage:/var/lib/containers/storage \
+  -v ./output:/output \
+  registry.redhat.io/rhel9/bootc-image-builder:9.4 \
+  --local --type iso "${IMAGE_NAME}"
 
 mkksiso ${KICKSTART} ./output/bootiso/install.iso bootc-plus-kickstart.iso
+
+
+############################################################################
+# Optional: serve the image from the local registry
+############################################################################
+
+# Devices pull their updates from wherever the image was installed from, so
+# push it to the local registry before flashing if you want `bootc upgrade` to
+# work on the LAN. Edit rhem.ks so ostreecontainer/bootc switch points here.
+podman tag "${IMAGE_NAME}" "$HOSTIP:5000/jetson-flightctl-1.3.0-docker-compose:${DATE_TAG}"
+podman push "$HOSTIP:5000/jetson-flightctl-1.3.0-docker-compose:${DATE_TAG}"

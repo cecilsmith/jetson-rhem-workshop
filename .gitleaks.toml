@@ -2,7 +2,7 @@
 #
 # Extends the upstream default ruleset and adds rules for the credential
 # shapes that actually show up in this repo: Red Hat subscription/registry
-# logins, OpenShift pull secrets, Flight Control enrollment configs, and
+# logins, container registry pull secrets, Flight Control enrollment configs,
 # baked-in device passwords in the Jetson Containerfiles.
 
 title = "jetson-rhem-workshop secret scanning"
@@ -53,7 +53,7 @@ regex = '''echo\s+["'][^\s"':$]+:[^\s"':$][^\s"':]{2,}["']\s*\|\s*chpasswd'''
 tags = ["password"]
 
 # --------------------------------------------------------------------------
-# OpenShift / registry pull secrets
+# Container registry pull secrets
 # --------------------------------------------------------------------------
 
 [[rules]]
@@ -80,7 +80,6 @@ tags = ["flightctl", "certificate"]
 [[allowlists]]
 description = "Documentation placeholders and template markers"
 regexes = [
-  '''<INSERT PULL SECRET HERE>''',
   '''FlightCtl_SERVER_(IP|HOSTNAME)''',
   '''your-registry\.com''',
   '''\$\{?[A-Z_][A-Z0-9_]*\}?''',

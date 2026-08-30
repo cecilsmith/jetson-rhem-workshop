@@ -1,5 +1,3 @@
-# This version removes microshift.
-
 # Start with a standard RHEL Image Mode image for 9.4
 FROM registry.redhat.io/rhel9/rhel-bootc:9.4
 
@@ -66,7 +64,7 @@ RUN if [ -z "${USER_PASSWD}" ] ; then \
 RUN useradd -m -d /var/home/$USERNAME -G wheel $USERNAME && \
     echo "${USERNAME}:${USER_PASSWD}" | chpasswd
 
-# Mandatory firewall configuration for microshift
+# Firewall configuration
 RUN firewall-offline-cmd --zone=public --add-port=22/tcp && \
     firewall-offline-cmd --zone=trusted --add-source=10.42.0.0/16
 
