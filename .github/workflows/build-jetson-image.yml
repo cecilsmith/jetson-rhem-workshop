@@ -435,11 +435,28 @@ jobs:
           # NOTE: this only proves they are absent from the TOP of the stack. A
           # file deleted in the final layer is still recoverable from the layer
           # below it, which is what the squash assertion below covers.
-          leftovers="$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE_REF" -c \
-            'ls -A /etc/pki/entitlement /etc/pki/consumer 2>/dev/null' || true)"
+          #
+          # Enumerate per-directory rather than `ls -A dir1 dir2`: with more than
+          # one operand ls prints a "dirname:" header for each, so the output is
+          # non-empty even when every directory is empty. `subscription-manager
+          # clean` empties these directories but leaves them in place, so that
+          # form reports a leak on every single build.
+          leftovers="$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE_REF" -c '
+            for d in /etc/pki/entitlement /etc/pki/consumer ; do
+              [ -d "$d" ] || continue
+              for f in "$d"/* "$d"/.* ; do
+                case "${f##*/}" in .|..) continue ;; esac
+                [ -e "$f" ] || continue
+                echo "$f"
+              done
+            done' 2>/dev/null || true)"
           if [ -n "$leftovers" ]; then
-            echo "::error::Red Hat entitlement certificates remain in the image. Ensure the Containerfile ends with: subscription-manager unregister && subscription-manager clean"
+            echo "::error::Red Hat entitlement material remains in the image. Ensure the Containerfile ends with: subscription-manager unregister && subscription-manager clean"
+            echo "Files found:"
+            printf '%s\n' "$leftovers" | sed 's/^/  /'
             fail=1
+          else
+            echo "No entitlement or consumer certificates present in the image."
           fi
 
           # Assert that --squash actually took effect, rather than trusting that
