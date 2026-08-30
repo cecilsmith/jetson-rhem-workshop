@@ -506,6 +506,44 @@ jobs:
           esac
           echo "| flightctl-agent (actual) | \`${actual}\` |" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Detect compose provider
+        id: compose
+        env:
+          IMAGE_REF: ${{ steps.resolve.outputs.image_ref }}
+        run: |
+          set -uo pipefail
+          # `podman compose` is a thin wrapper around an external provider and
+          # announces which one it delegates to, so one call yields both the
+          # provider and its version. The fallbacks cover an image without
+          # podman, or one where the provider is only on the CLI-plugin path.
+          raw="$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE_REF" -c '
+            podman compose version 2>&1 || true
+            for c in docker-compose podman-compose ; do
+              command -v "$c" >/dev/null 2>&1 && { echo "$c" ; "$c" --version 2>&1 | head -1 ; }
+            done
+            for p in /usr/libexec/docker/cli-plugins/docker-compose \
+                     /usr/lib/docker/cli-plugins/docker-compose ; do
+              [ -x "$p" ] && { echo "$p" ; "$p" version 2>&1 | head -1 ; }
+            done
+          ' 2>/dev/null || true)"
+
+          echo "--- provider probe ---"
+          printf '%s\n' "$raw"
+          echo "---------------------"
+
+          provider="$(printf '%s\n' "$raw" | sed -n 's/.*compose provider "\([^"]*\)".*/\1/p' | head -1)"
+          provider="${provider##*/}"
+          [ -n "$provider" ] || provider="$(printf '%s\n' "$raw" | grep -oE '(docker-compose|podman-compose)' | head -1)"
+          version="$(printf '%s\n' "$raw" | grep -i version | grep -vi 'compose provider' | grep -oiE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+
+          echo "provider=${provider:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "version=${version:-unknown}"   >> "$GITHUB_OUTPUT"
+          echo "Compose provider: ${provider:-unknown} ${version:-unknown}"
+          echo "| Compose provider | \`${provider:-unknown}\` \`${version:-unknown}\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$provider" ]; then
+            echo "::warning::No compose provider found in the image. The Containerfile installs docker-compose-plugin; check that step succeeded."
+          fi
+
       - name: Push image to ghcr.io
         if: inputs.push_to_ghcr
         env:
@@ -573,6 +611,8 @@ jobs:
           DATE_TAG: ${{ steps.resolve.outputs.date_tag }}
           CONTAINERFILE_LINK: ${{ steps.resolve.outputs.containerfile_link }}
           AGENT_VERSION: ${{ steps.agentver.outputs.actual }}
+          COMPOSE_PROVIDER: ${{ steps.compose.outputs.provider }}
+          COMPOSE_VERSION: ${{ steps.compose.outputs.version }}
           SPLIT: ${{ steps.package.outputs.split }}
           OUT: ${{ steps.package.outputs.dir }}
           STEM: ${{ steps.package.outputs.stem }}
@@ -589,7 +629,20 @@ jobs:
             echo "| Image | \`${IMAGE_REF}\` |"
             echo "| Containerfile | \`${CONTAINERFILE_LINK}\` |"
             echo "| flightctl-agent | \`${AGENT_VERSION}\` |"
+            echo "| Compose provider | \`${COMPOSE_PROVIDER}\` \`${COMPOSE_VERSION}\` |"
             echo "| Built from | \`${GITHUB_SHA}\` |"
+            echo
+            echo "## What to download"
+            echo
+            if [ "$SPLIT" = "true" ]; then
+              echo "The image is **\`${STEM}.tar.zst.part*\`** (all parts) plus \`SHA256SUMS\`."
+            else
+              echo "The image is **\`${STEM}.tar.zst\`** plus \`SHA256SUMS\`."
+            fi
+            echo
+            echo "Ignore *Source code (zip)* and *Source code (tar.gz)* — GitHub attaches those"
+            echo "to every release automatically and they cannot be removed. They are the"
+            echo "repository, not the built image."
             echo
             echo "## Logging in"
             echo
