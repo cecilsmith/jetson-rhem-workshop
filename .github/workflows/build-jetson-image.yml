@@ -250,17 +250,29 @@ jobs:
       # readable, those certs are public no matter how the final image is built.
       - name: Assert the build cache is not publicly readable
         run: |
+          # NOTE: the runner invokes every `run:` block as `bash -e`, which a
+          # `set -uo pipefail` line does NOT undo. Both curls below fail by
+          # design when the package is private or absent (the ghcr.io token
+          # endpoint answers 403), so each one must be guarded or -e aborts the
+          # step and reports a false positive.
           set -uo pipefail
           repo_lc="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           pkg="${repo_lc}/buildcache"
 
           # Anonymous pull attempt. Succeeding means anyone on the internet can
           # read the cached layers.
-          tok="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${pkg}:pull" \
-                 2>/dev/null | jq -r '.token // empty')"
-          if [ -n "$tok" ] && curl -fsS -o /dev/null \
-               -H "Authorization: Bearer ${tok}" \
-               "https://ghcr.io/v2/${pkg}/tags/list" 2>/dev/null; then
+          body="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${pkg}:pull" 2>/dev/null || true)"
+          tok="$(printf '%s' "$body" | jq -r '.token // empty' 2>/dev/null || true)"
+
+          public=no
+          if [ -n "$tok" ]; then
+            if curl -fsS -o /dev/null -H "Authorization: Bearer ${tok}" \
+                 "https://ghcr.io/v2/${pkg}/tags/list" 2>/dev/null; then
+              public=yes
+            fi
+          fi
+
+          if [ "$public" = yes ]; then
             echo "::error::The build cache package ghcr.io/${pkg} is PUBLICLY READABLE."
             echo "::error::It contains pre-cleanup layers holding Red Hat entitlement certificates. Set the package to private at https://github.com/users/${{ github.repository_owner }}/packages/container/package/buildcache/settings and rotate the entitlement by re-registering the system."
             exit 1

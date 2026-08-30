@@ -14,10 +14,17 @@ useDefault = true
 # Red Hat subscription-manager credentials
 # --------------------------------------------------------------------------
 
-# NOTE: gitleaks compiles these with RE2, which has NO lookaround support.
-# A `(?!...)` here does not fail gracefully — it panics the whole scan at
-# config-load time. Express "not followed by X" as a negated character class
-# instead, e.g. `[^\s"'$]` for "not a shell variable reference".
+# NOTE: gitleaks compiles these with RE2 (via go-re2). RE2 rejects several
+# common PCRE constructs, and a rejected pattern does not fail gracefully — it
+# panics the entire scan at config-load time. Keep every rule below RE2-clean:
+#
+#   * no lookaround: (?=  (?!  (?<=  (?<!
+#       express "not followed by X" as a negated class, e.g. [^\s"'$]
+#   * no backreferences: \1 .. \9
+#   * no atomic groups (?>...) and no possessive quantifiers (a*+, a++)
+#   * bounded repetitions max out at 1000 — {0,4000} is a hard error
+#
+# Lazy quantifiers (a{0,900}?), (?i)/(?m) flags and \b ARE supported.
 
 [[rules]]
 id = "rh-subscription-manager-password"
@@ -52,7 +59,8 @@ tags = ["password"]
 [[rules]]
 id = "container-registry-authfile"
 description = "Container registry auth blob (pull secret / auth.json)"
-regex = '''"auths"\s*:\s*\{[^}]{0,4000}?"auth"\s*:\s*"[A-Za-z0-9+/=]{16,}"'''
+# RE2 caps repetition counts at 1000, so this window cannot be widened much.
+regex = '''"auths"\s*:\s*\{[^}]{0,900}?"auth"\s*:\s*"[A-Za-z0-9+/=]{16,}"'''
 tags = ["pull-secret", "registry"]
 
 # --------------------------------------------------------------------------
