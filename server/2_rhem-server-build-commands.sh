@@ -15,8 +15,12 @@ RHEM_ADMIN_PASSWD=admin
 echo "Installing Edge Manager version 1.0.2..."
 dnf clean all
 dnf config-manager --add-repo https://rpm.flightctl.io/flightctl-epel.repo
-dnf install -y flightctl-services-1.0.2-1.el9.x86_64
-dnf install -y flightctl-cli-1.0.2-1.el9.x86_64
+# Install the latest release of Edge Manager packages
+dnf install -y flightctl-services
+dnf install -y flightctl-cli
+# Refer to the following commands to install a specific version of Edge Manager packages
+# dnf install -y flightctl-services-1.0.2-1.el9.x86_64
+# dnf install -y flightctl-cli-1.0.2-1.el9.x86_64
 
 echo "Setting baseDomain to hostname and starting Edge Manager..."
 

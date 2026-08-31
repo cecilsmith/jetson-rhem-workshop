@@ -1,7 +1,7 @@
 # Repository secrets
 
-`.github/workflows/build-jetson-image.yml` builds the Jetson bootc image on a
-GitHub-hosted **ARM64** runner. Everything it needs to authenticate comes from
+`.github/workflows/build-images.yml` builds both Jetson bootc images
+(`docker-compose` and `podman-compose`) on a GitHub-hosted **ARM64** runner. Everything it needs to authenticate comes from
 repository secrets — nothing credential-bearing lives in the repo.
 
 `.github/workflows/secret-scan.yml` is the other half: it scans the full git
@@ -44,7 +44,7 @@ flashed device can log into it, so change these before deploying a device
 anywhere outside a lab.
 
 `GITHUB_TOKEN` is provided automatically — you do not create it. It is used to
-push the layer cache to `ghcr.io` and to create the release.
+push the per-variant layer caches to `ghcr.io` and to create the release.
 
 ## Use a registry service account, not your portal password
 
@@ -59,8 +59,8 @@ pulls, so a leak does not hand over your Red Hat account.
 1. Go to `https://github.com/cecilsmith/jetson-rhem-workshop/settings/secrets/actions`
    (repo → **Settings** → **Secrets and variables** → **Actions**).
 2. **New repository secret**, one per row in the tables above.
-3. Name must match exactly — the `preflight` job lists any that are missing and
-   stops before the ARM runner is allocated.
+3. Name must match exactly — the `resolve` job lists any that are missing and
+   stops before the ARM runners are allocated.
 
 ### `gh` CLI
 
@@ -108,14 +108,14 @@ rather than merely whiteouted in a lower layer. This is enforced, not assumed:
 ## Keep the build cache private
 
 `--cache-to` exports the **intermediate** layers to
-`ghcr.io/<owner>/<repo>/buildcache`, including the layer created immediately
+`ghcr.io/<owner>/<repo>/buildcache-<variant>`, including the layer created immediately
 after `subscription-manager register` — entitlement certificates intact.
 `--squash` does nothing about this, because the cache is written before the
 final image is committed.
 
 The build asserts the cache is not anonymously readable and fails if it is. If
 that check ever fires: set the package to private under
-**your profile → Packages → buildcache → Package settings**, then re-register
+**your profile → Packages → buildcache-\<variant\> → Package settings**, then re-register
 the affected system so the exposed entitlement is rotated.
 
 ## Operational notes
@@ -126,8 +126,8 @@ the affected system so the exposed entitlement is rotated.
   registration. Check <https://access.redhat.com/management/systems> now and
   then and delete stale `localhost`-ish entries.
 - **Secrets and forks.** Secrets are not exposed to `pull_request` runs from
-  forks, which is why the build workflow triggers only on `push` to `main` and
-  `workflow_dispatch`.
+  forks, which is why the build workflow triggers only on `schedule`, `push` to
+  `main`, and `workflow_dispatch`.
 - **Rotation.** After rotating `RH_PASSWD`, update the secret and re-run. The
   registration layer is cached for 168h, so an already-cached build will not
   re-authenticate until the cache expires or the Containerfile changes.

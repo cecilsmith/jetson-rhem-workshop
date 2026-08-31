@@ -1,0 +1,635 @@
+name: Build Jetson images
+
+# Builds the two Jetson Orin bootc images (docker-compose and podman-compose)
+# natively on ARM64 and publishes them as one GitHub Release per Flight Control
+# version + build date.
+#
+# The daily schedule is the interesting trigger: it asks rpm.flightctl.io what
+# the newest GA flightctl-agent is and builds only when that version has not
+# been released here yet. The RPM repository is used rather than the flightctl
+# GitHub releases page because the RPM is what `dnf install` actually consumes —
+# a GitHub release can land before the RPM is published.
+#
+# Required repository secrets are documented in .github/SECRETS.md
+
+on:
+  schedule:
+    # Daily. Builds only if Flight Control shipped a version we have not built.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      flightctl_version:
+        description: "Flight Control version to build (blank = newest GA in the RPM repo)"
+        required: false
+        default: ""
+      force:
+        description: "Build even if a release already exists for that version"
+        type: boolean
+        default: false
+      publish_release:
+        description: "Publish a GitHub Release with the saved image tarballs"
+        type: boolean
+        default: true
+      push_to_ghcr:
+        description: "Also push the images to ghcr.io"
+        type: boolean
+        default: false
+      squash:
+        description: "Squash all new layers into one (keeps deleted entitlement certs out of the tarball)"
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - "images/Containerfile"
+      # Deliberately NOT triggered by edits to this workflow file: iterating on
+      # CI would otherwise kick off a multi-hour build on every commit.
+
+permissions:
+  contents: write   # create the release
+  packages: write   # push the build cache (and optionally the images) to ghcr.io
+
+concurrency:
+  group: build-jetson-images
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Decide what to build, and whether to build at all.
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve version and preflight
+    runs-on: ubuntu-latest
+    outputs:
+      build:        ${{ steps.decide.outputs.build }}
+      version:      ${{ steps.decide.outputs.version }}
+      date_tag:     ${{ steps.decide.outputs.date_tag }}
+      release_tag:  ${{ steps.decide.outputs.release_tag }}
+      publish:      ${{ steps.decide.outputs.publish }}
+    steps:
+      - name: Verify required secrets are present
+        env:
+          REDHAT_REGISTRY_USERNAME: ${{ secrets.REDHAT_REGISTRY_USERNAME }}
+          REDHAT_REGISTRY_PASSWORD: ${{ secrets.REDHAT_REGISTRY_PASSWORD }}
+          RH_USERNAME: ${{ secrets.RH_USERNAME }}
+          RH_PASSWD: ${{ secrets.RH_PASSWD }}
+          DEVICE_USERNAME: ${{ vars.DEVICE_USERNAME || 'redhat' }}
+          DEVICE_USER_PASSWD: ${{ vars.DEVICE_USER_PASSWD || 'redhat' }}
+        run: |
+          set -uo pipefail
+          # The device login is deliberately PUBLIC so anyone flashing a device
+          # can log in, so it lives in repository *variables*, not secrets.
+          missing=()
+          for name in REDHAT_REGISTRY_USERNAME REDHAT_REGISTRY_PASSWORD \
+                      RH_USERNAME RH_PASSWD; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing repository secrets: ${missing[*]}. See .github/SECRETS.md"
+            exit 1
+          fi
+          echo "All required secrets are configured."
+          echo "Device login: ${DEVICE_USERNAME} / ${DEVICE_USER_PASSWD}"
+
+      # Without --squash the archive retains recoverable entitlement
+      # certificates, and a release on a non-private repository is public.
+      # Catch that here rather than after a multi-hour build.
+      - name: Refuse an unpublishable release up front
+        if: github.event_name == 'workflow_dispatch' && inputs.squash == false && inputs.publish_release
+        env:
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -uo pipefail
+          if [ "${REPO_VISIBILITY}" != "private" ]; then
+            echo "::error::squash=false with publish_release=true on a ${REPO_VISIBILITY} repository would publish Red Hat entitlement certificates."
+            echo "::error::Set publish_release=false and use push_to_ghcr with a private package instead."
+            exit 1
+          fi
+
+      - name: Resolve Flight Control version
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.flightctl_version }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || 'false' }}
+        run: |
+          set -uo pipefail
+
+          if [ -n "${INPUT_VERSION}" ]; then
+            version="${INPUT_VERSION}"
+            echo "Version pinned by workflow input: ${version}"
+          else
+            # Newest GA flightctl-agent in the repo the image installs from.
+            # Release candidates appear as 1.3.0.rc1 / 1.3.0~rc1 and are excluded.
+            listing="$(curl -sSf --max-time 60 https://rpm.flightctl.io/epel/9/aarch64/ || true)"
+            if [ -z "$listing" ]; then
+              echo "::error::Could not read https://rpm.flightctl.io/epel/9/aarch64/"
+              exit 1
+            fi
+            version="$(printf '%s' "$listing" \
+              | grep -oE 'flightctl-agent-[0-9][^"<]*\.rpm' \
+              | grep -viE 'rc[0-9]|~' \
+              | sed -E 's/^flightctl-agent-([0-9][^-]*)-.*/\1/' \
+              | sort -V | uniq | tail -1)"
+            if [ -z "$version" ]; then
+              echo "::error::No GA flightctl-agent RPM found in the repository listing."
+              exit 1
+            fi
+            echo "Newest GA flightctl-agent in the RPM repo: ${version}"
+          fi
+
+          date_tag="$(date -u +%Y-%m-%d)"
+          release_tag="v${version}-${date_tag}"
+
+          # Has this Flight Control version already been *published* here?
+          # Drafts are excluded deliberately: a build that failed after the
+          # draft was created would otherwise look like a completed release and
+          # suppress every future retry for that version.
+          existing="$(gh release list --limit 100 --json tagName,isDraft \
+                        --jq '.[] | select(.isDraft | not) | .tagName' 2>/dev/null || true)"
+          already=no
+          if printf '%s\n' "$existing" | grep -q "^v${version}-"; then already=yes; fi
+
+          build=true
+          reason="new Flight Control version ${version}"
+          if [ "$already" = yes ] && [ "${FORCE}" != "true" ] \
+             && [ "${{ github.event_name }}" = "schedule" ]; then
+            build=false
+            reason="Flight Control ${version} has already been released; nothing to do"
+          elif [ "$already" = yes ]; then
+            reason="Flight Control ${version} already released, rebuilding anyway (${{ github.event_name }})"
+          fi
+
+          publish=true
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.publish_release }}" != "true" ]; then
+            publish=false
+          fi
+
+          {
+            echo "build=${build}"
+            echo "version=${version}"
+            echo "date_tag=${date_tag}"
+            echo "release_tag=${release_tag}"
+            echo "publish=${publish}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Build decision"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Flight Control | \`${version}\` |"
+            echo "| Build date | \`${date_tag}\` |"
+            echo "| Release tag | \`${release_tag}\` |"
+            echo "| Building | \`${build}\` |"
+            echo "| Reason | ${reason} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "${reason}"
+
+      # One release holds both variants, so it is created once here as a draft
+      # and each matrix job uploads its own assets into it. This avoids pushing
+      # multi-GB tarballs through the Actions artifact store.
+      - name: Create draft release
+        if: steps.decide.outputs.build == 'true' && steps.decide.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.decide.outputs.release_tag }}
+          VERSION: ${{ steps.decide.outputs.version }}
+          DATE_TAG: ${{ steps.decide.outputs.date_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; reusing it."
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --title "Flight Control ${VERSION} — ${DATE_TAG}" \
+              --notes "Build in progress…" \
+              --target "$GITHUB_SHA"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build both variants in parallel on native ARM64.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.compose }}
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    # Native aarch64 hosted runner. Free for public repositories.
+    # QEMU emulation is NOT used: nvidia-jetpack-* and subscription-manager
+    # under binfmt emulation is both unreliable and ~10x slower.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        compose: [docker-compose, podman-compose]
+
+    env:
+      IMAGE_NAME: jetson-${{ matrix.compose }}
+      IMAGE_TAG: ${{ needs.resolve.outputs.version }}-${{ needs.resolve.outputs.date_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Do NOT apt-install podman here. ubuntu-24.04-arm already ships podman,
+      # buildah, skopeo, zstd, jq and gh. Installing the Ubuntu podman package
+      # on top leaves two podman versions on the box plus a /dev/shm/libpod_lock
+      # segment sized for the other one, and every later podman call dies with:
+      #   failed to open 2048 locks in /libpod_lock: numerical result out of range
+      - name: Check container tooling
+        run: |
+          set -euo pipefail
+          sudo rm -f /dev/shm/libpod_lock /dev/shm/libpod_rootless_lock_* || true
+          for tool in podman skopeo zstd jq gh; do
+            printf '%-8s %s\n' "$tool" "$(command -v "$tool" || echo MISSING)"
+          done
+          podman version
+          sudo podman info --format 'driver={{.Store.GraphDriverName}} root={{.Store.GraphRoot}}'
+          df -h /
+
+      - name: Log in to registry.redhat.io and ghcr.io
+        env:
+          REDHAT_REGISTRY_USERNAME: ${{ secrets.REDHAT_REGISTRY_USERNAME }}
+          REDHAT_REGISTRY_PASSWORD: ${{ secrets.REDHAT_REGISTRY_PASSWORD }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REDHAT_REGISTRY_PASSWORD" \
+            | sudo podman login registry.redhat.io \
+                --username "$REDHAT_REGISTRY_USERNAME" --password-stdin
+          printf '%s' "$GHCR_TOKEN" \
+            | sudo podman login ghcr.io \
+                --username "${{ github.actor }}" --password-stdin
+
+      # The layer cache is a disclosure path that --squash does nothing about:
+      # --cache-to exports the INTERMEDIATE layers, including the one created
+      # right after `subscription-manager register`, with entitlement
+      # certificates intact. If that package is publicly readable, those certs
+      # are public no matter how the final image is built.
+      - name: Assert the build cache is not publicly readable
+        run: |
+          # The runner invokes every `run:` block as `bash -e`, which a
+          # `set -uo pipefail` line does NOT undo. Both curls below fail by
+          # design when the package is private or absent (the ghcr.io token
+          # endpoint answers 403), so each must be guarded or -e aborts the step
+          # and reports a false positive.
+          set -uo pipefail
+          repo_lc="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          pkg="${repo_lc}/buildcache-${{ matrix.compose }}"
+
+          body="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${pkg}:pull" 2>/dev/null || true)"
+          tok="$(printf '%s' "$body" | jq -r '.token // empty' 2>/dev/null || true)"
+
+          public=no
+          if [ -n "$tok" ]; then
+            if curl -fsS -o /dev/null -H "Authorization: Bearer ${tok}" \
+                 "https://ghcr.io/v2/${pkg}/tags/list" 2>/dev/null; then
+              public=yes
+            fi
+          fi
+
+          if [ "$public" = yes ]; then
+            echo "::error::The build cache package ghcr.io/${pkg} is PUBLICLY READABLE."
+            echo "::error::It contains pre-cleanup layers holding Red Hat entitlement certificates. Set the package to private in your profile's Packages settings and rotate the entitlement by re-registering the system."
+            exit 1
+          fi
+          echo "Build cache is not anonymously readable (private, or not created yet)."
+
+      - name: Stage build secrets
+        id: secrets
+        env:
+          RH_USERNAME: ${{ secrets.RH_USERNAME }}
+          RH_PASSWD: ${{ secrets.RH_PASSWD }}
+        run: |
+          set -euo pipefail
+          # Genuinely secret values go to files under RUNNER_TEMP (outside the
+          # build context) and are mounted with --secret, so they never land in
+          # image history. The device login is intentionally public and is
+          # passed as a plain --build-arg.
+          dir="${RUNNER_TEMP}/build-secrets"
+          mkdir -p "$dir"; chmod 700 "$dir"
+          umask 077
+          printf '%s' "$RH_USERNAME" > "$dir/rh_username"
+          printf '%s' "$RH_PASSWD"   > "$dir/rh_password"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        id: build
+        env:
+          SECRET_DIR: ${{ steps.secrets.outputs.dir }}
+          COMPOSE_PROVIDER: ${{ matrix.compose }}
+          FLIGHTCTL_VERSION: ${{ needs.resolve.outputs.version }}
+          DEVICE_USERNAME: ${{ vars.DEVICE_USERNAME || 'redhat' }}
+          DEVICE_USER_PASSWD: ${{ vars.DEVICE_USER_PASSWD || 'redhat' }}
+          # Note: `A && B || C` yields C whenever B is falsy, so test for the
+          # false case explicitly rather than passing inputs.squash through.
+          SQUASH: ${{ (github.event_name == 'workflow_dispatch' && inputs.squash == false) && 'false' || 'true' }}
+        run: |
+          set -euo pipefail
+
+          # Registry-backed layer cache, one per variant so they do not thrash
+          # each other. The Actions cache is capped at 10 GB per repo, which a
+          # RHEL bootc image with nvidia-jetpack blows past on its own.
+          repo_lc="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          cache_repo="ghcr.io/${repo_lc}/buildcache-${COMPOSE_PROVIDER}"
+
+          cache_flags=()
+          if podman build --help 2>/dev/null | grep -q -- '--cache-to'; then
+            cache_flags=( --cache-from "${cache_repo}" --cache-to "${cache_repo}" )
+            if podman build --help 2>/dev/null | grep -q -- '--cache-ttl'; then
+              cache_flags+=( --cache-ttl 168h )
+            fi
+            echo "Layer cache: ${cache_repo}"
+          else
+            echo "::warning::This podman build does not support --cache-to; building without a remote layer cache."
+          fi
+
+          # --squash collapses every layer this Containerfile adds into one.
+          # Without it, the entitlement certificates that the final
+          # `subscription-manager clean` deletes are only whiteouted: the real
+          # files remain readable in an earlier layer of the saved archive,
+          # which then ships as a public release asset.
+          squash_flag=()
+          if [ "${SQUASH}" != "false" ]; then squash_flag=( --squash ); fi
+
+          # Validate the flag combination against a throwaway scratch build, so
+          # an incompatibility surfaces in seconds rather than after a
+          # multi-hour build. This is a HARD failure: this repository is public,
+          # so a release asset is public.
+          probe="${RUNNER_TEMP}/flagprobe"
+          mkdir -p "$probe"
+          echo probe > "$probe/probe.txt"
+          printf 'FROM scratch\nCOPY probe.txt /probe.txt\n' > "$probe/Containerfile"
+          if ! sudo podman build --layers "${squash_flag[@]}" \
+                 -t localhost/flagprobe:tmp \
+                 -f "$probe/Containerfile" "$probe" >/dev/null 2>&1; then
+            echo "::error::podman rejected '--layers ${squash_flag[*]:-}'. Not continuing: without --squash the saved archive retains Red Hat entitlement certificates in a lower layer, and this repository is public."
+            exit 1
+          fi
+          sudo podman rmi -f localhost/flagprobe:tmp >/dev/null 2>&1 || true
+
+          sudo podman build \
+            --platform linux/arm64 \
+            --layers \
+            "${squash_flag[@]}" \
+            "${cache_flags[@]}" \
+            --secret "id=rh_username,src=${SECRET_DIR}/rh_username" \
+            --secret "id=rh_password,src=${SECRET_DIR}/rh_password" \
+            --build-arg "COMPOSE_PROVIDER=${COMPOSE_PROVIDER}" \
+            --build-arg "FLIGHTCTL_VERSION=${FLIGHTCTL_VERSION}" \
+            --build-arg "USERNAME=${DEVICE_USERNAME}" \
+            --build-arg "USER_PASSWD=${DEVICE_USER_PASSWD}" \
+            -t "localhost/${IMAGE_NAME}:${IMAGE_TAG}" \
+            -f images/Containerfile \
+            .
+
+          sudo podman images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | head
+          df -h /
+
+      - name: Scrub staged secrets
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/build-secrets" || true
+
+      - name: Verify the image
+        id: verify
+        env:
+          RH_USERNAME: ${{ secrets.RH_USERNAME }}
+          RH_PASSWD: ${{ secrets.RH_PASSWD }}
+          COMPOSE_PROVIDER: ${{ matrix.compose }}
+          FLIGHTCTL_VERSION: ${{ needs.resolve.outputs.version }}
+          SQUASH: ${{ (github.event_name == 'workflow_dispatch' && inputs.squash == false) && 'false' || 'true' }}
+        run: |
+          set -uo pipefail
+          ref="localhost/${IMAGE_NAME}:${IMAGE_TAG}"
+          fail=0
+
+          # 1. No Red Hat credentials in the image metadata. The device login is
+          #    intentionally present there and is not checked.
+          meta="$(sudo podman history --no-trunc --format '{{.CreatedBy}}' "$ref"; \
+                  sudo podman inspect --format '{{json .Config}}' "$ref")"
+          for name in RH_USERNAME RH_PASSWD; do
+            value="${!name}"
+            [ -n "$value" ] || continue
+            if printf '%s' "$meta" | grep -qF -- "$value"; then
+              echo "::error::The value of secret $name appears in the built image metadata."
+              fail=1
+            fi
+          done
+
+          # 2. No entitlement material in the merged filesystem. Enumerate
+          #    per-directory: `ls -A dir1 dir2` prints a "dirname:" header for
+          #    each operand, so it is non-empty even when both are empty, and
+          #    `subscription-manager clean` empties but does not remove them.
+          leftovers="$(sudo podman run --rm --entrypoint /bin/sh "$ref" -c '
+            for d in /etc/pki/entitlement /etc/pki/consumer ; do
+              [ -d "$d" ] || continue
+              for f in "$d"/* "$d"/.* ; do
+                case "${f##*/}" in .|..) continue ;; esac
+                [ -e "$f" ] || continue
+                echo "$f"
+              done
+            done' 2>/dev/null || true)"
+          if [ -n "$leftovers" ]; then
+            echo "::error::Red Hat entitlement material remains in the image:"
+            printf '%s\n' "$leftovers" | sed 's/^/  /'
+            fail=1
+          else
+            echo "No entitlement or consumer certificates present in the image."
+          fi
+
+          # 3. Prove --squash took effect rather than trusting the flag was
+          #    accepted. buildah has used both semantics (collapse everything vs
+          #    collapse only the new layers), so accept either shape.
+          base="$(grep -iE '^[[:space:]]*FROM[[:space:]]' images/Containerfile | head -1 | awk '{print $2}')"
+          n="$(sudo podman image inspect "$ref" --format '{{len .RootFS.Layers}}' 2>/dev/null || echo 0)"
+          b="$(sudo podman image inspect "$base" --format '{{len .RootFS.Layers}}' 2>/dev/null || echo 0)"
+          echo "Layers: image=${n} base=${b} (base ${base})"
+          publishable=false
+          if [ "$n" = "1" ] || { [ "$b" != "0" ] && [ "$n" = "$((b + 1))" ]; }; then
+            echo "Squash confirmed: this Containerfile contributes a single layer."
+            publishable=true
+          elif [ "${SQUASH}" = "false" ]; then
+            echo "::warning::Built without --squash by request; this archive will NOT be published as a release."
+          else
+            echo "::error::--squash was requested but did not take effect (${n} layers over a ${b}-layer base)."
+            fail=1
+          fi
+          echo "publishable=${publishable}" >> "$GITHUB_OUTPUT"
+
+          # 4. The image contains the flightctl version this release claims.
+          agent="$(sudo podman run --rm --entrypoint /bin/sh "$ref" -c \
+            'rpm -q --qf "%{VERSION}-%{RELEASE}" flightctl-agent' 2>/dev/null || echo unknown)"
+          echo "flightctl-agent: ${agent}"
+          case "$agent" in
+            "${FLIGHTCTL_VERSION}"*) ;;
+            *) echo "::error::Image contains flightctl-agent ${agent}, expected ${FLIGHTCTL_VERSION}."; fail=1 ;;
+          esac
+          echo "agent=${agent}" >> "$GITHUB_OUTPUT"
+
+          # 5. The compose provider this variant is named after is the one that
+          #    actually got installed. `podman compose` is a wrapper and reports
+          #    which external provider it delegates to.
+          raw="$(sudo podman run --rm --entrypoint /bin/sh "$ref" -c '
+            podman compose version 2>&1 || true
+            for c in docker-compose podman-compose ; do
+              command -v "$c" >/dev/null 2>&1 && { echo "$c" ; "$c" --version 2>&1 | head -1 ; }
+            done
+            for p in /usr/libexec/docker/cli-plugins/docker-compose \
+                     /usr/lib/docker/cli-plugins/docker-compose ; do
+              [ -x "$p" ] && { echo "$p" ; "$p" version 2>&1 | head -1 ; }
+            done' 2>/dev/null || true)"
+          echo "--- compose probe ---"; printf '%s\n' "$raw"; echo "---------------------"
+
+          provider="$(printf '%s\n' "$raw" | sed -n 's/.*compose provider "\([^"]*\)".*/\1/p' | head -1)"
+          provider="${provider##*/}"
+          [ -n "$provider" ] || provider="$(printf '%s\n' "$raw" | grep -oE '(docker-compose|podman-compose)' | head -1)"
+          cversion="$(printf '%s\n' "$raw" | grep -i version | grep -vi 'compose provider' | grep -oiE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+          echo "compose provider: ${provider:-unknown} ${cversion:-unknown}"
+          if [ "${provider:-unknown}" != "${COMPOSE_PROVIDER}" ]; then
+            echo "::error::This variant is named ${COMPOSE_PROVIDER} but the image provides '${provider:-none}'."
+            fail=1
+          fi
+          echo "compose_version=${cversion:-unknown}" >> "$GITHUB_OUTPUT"
+
+          exit $fail
+
+      - name: Push to ghcr.io
+        if: inputs.push_to_ghcr
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          owner_lc="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          dest="ghcr.io/${owner_lc}/${IMAGE_NAME}"
+          for t in "${IMAGE_TAG}" "${VERSION}" latest; do
+            sudo podman tag "localhost/${IMAGE_NAME}:${IMAGE_TAG}" "${dest}:${t}"
+            sudo podman push "${dest}:${t}"
+          done
+          echo "Pushed ${dest}:{${IMAGE_TAG},${VERSION},latest}"
+
+      - name: Save image and upload to the draft release
+        if: needs.resolve.outputs.publish == 'true' && steps.verify.outputs.publishable == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/release"; mkdir -p "$out"
+          stem="${IMAGE_NAME}-${IMAGE_TAG}"
+
+          # Stream straight into zstd rather than writing the uncompressed
+          # archive alongside podman's storage first.
+          sudo podman save --format docker-archive "localhost/${IMAGE_NAME}:${IMAGE_TAG}" \
+            | zstd -T0 -9 -o "${out}/${stem}.tar.zst"
+
+          sudo podman rmi -f "localhost/${IMAGE_NAME}:${IMAGE_TAG}" || true
+          sudo podman system prune -af || true
+
+          size=$(stat -c%s "${out}/${stem}.tar.zst")
+          echo "Compressed archive: $(numfmt --to=iec "$size")"
+
+          # GitHub Release assets are capped at 2 GiB each.
+          if [ "$size" -gt $((1900 * 1024 * 1024)) ]; then
+            echo "Archive exceeds the 2 GiB release-asset limit; splitting."
+            split -b 1900M -d -a 2 "${out}/${stem}.tar.zst" "${out}/${stem}.tar.zst.part"
+            rm -f "${out}/${stem}.tar.zst"
+          fi
+
+          # Exclude the checksum file itself: the redirection creates it before
+          # find runs, so an unfiltered find would checksum an empty file.
+          ( cd "$out" && find . -maxdepth 1 -type f ! -name '*.sha256' -printf '%P\n' | sort \
+              | xargs -r sha256sum > "${stem}.sha256" )
+          ls -lh "$out"
+
+          gh release upload "$RELEASE_TAG" "$out"/* --clobber
+
+      - name: Record variant facts
+        if: always()
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          {
+            echo "### ${IMAGE_NAME}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`localhost/${IMAGE_NAME}:${IMAGE_TAG}\` |"
+            echo "| flightctl-agent | \`${{ steps.verify.outputs.agent }}\` |"
+            echo "| Compose provider | \`${{ matrix.compose }}\` \`${{ steps.verify.outputs.compose_version }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Write the combined notes and publish, once both variants have uploaded.
+  # ---------------------------------------------------------------------------
+  finalize:
+    name: Publish release
+    needs: [resolve, build]
+    if: needs.resolve.outputs.build == 'true' && needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write notes and undraft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          DATE_TAG: ${{ needs.resolve.outputs.date_tag }}
+          DEVICE_USERNAME: ${{ vars.DEVICE_USERNAME || 'redhat' }}
+          DEVICE_USER_PASSWD: ${{ vars.DEVICE_USER_PASSWD || 'redhat' }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/NOTES.md"
+          {
+            echo "NVIDIA Jetson Orin RHEL Image Mode (bootc) images, built natively on arm64."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Flight Control agent | \`${VERSION}\` |"
+            echo "| Build date | \`${DATE_TAG}\` |"
+            echo "| RHEL | \`9.4\` |"
+            echo "| JetPack | \`6.1\` |"
+            echo "| Built from | \`${GITHUB_SHA}\` |"
+            echo
+            echo "## Images"
+            echo
+            echo "Two variants, identical except for the compose implementation."
+            echo "Neither installs a Docker daemon."
+            echo
+            echo "| Variant | Compose | Asset |"
+            echo "|---|---|---|"
+            echo "| \`jetson-docker-compose\` | Docker Compose v2 plugin | \`jetson-docker-compose-${VERSION}-${DATE_TAG}.tar.zst\` |"
+            echo "| \`jetson-podman-compose\` | \`podman-compose\` (EPEL) | \`jetson-podman-compose-${VERSION}-${DATE_TAG}.tar.zst\` |"
+            echo
+            echo "Each asset has a matching \`.sha256\`. Ignore *Source code (zip)* and"
+            echo "*Source code (tar.gz)* — GitHub attaches those to every release"
+            echo "automatically and they cannot be removed; they are the repository,"
+            echo "not the images."
+            echo
+            echo "## Load an image"
+            echo
+            echo '```bash'
+            echo "VARIANT=jetson-docker-compose   # or jetson-podman-compose"
+            echo "sha256sum -c \${VARIANT}-${VERSION}-${DATE_TAG}.sha256"
+            echo "zstd -d \${VARIANT}-${VERSION}-${DATE_TAG}.tar.zst"
+            echo "sudo podman load -i \${VARIANT}-${VERSION}-${DATE_TAG}.tar"
+            echo '```'
+            echo
+            echo "If an asset was split at the 2 GiB limit, join the parts first:"
+            echo "\`cat \${VARIANT}-${VERSION}-${DATE_TAG}.tar.zst.part* > \${VARIANT}-${VERSION}-${DATE_TAG}.tar.zst\`"
+            echo
+            echo "## Logging in"
+            echo
+            echo "| Username | Password |"
+            echo "|---|---|"
+            echo "| \`${DEVICE_USERNAME}\` | \`${DEVICE_USER_PASSWD}\` |"
+            echo
+            echo "In the \`wheel\` group, so it can \`sudo\`. Published deliberately for"
+            echo "workshop use — change it before deploying a device anywhere that matters."
+            echo
+            echo "> These images carry no Red Hat subscription credentials: registration"
+            echo "> uses \`--mount=type=secret\` and is undone before the final layer."
+            echo "> The device login above **is** baked in, by design."
+          } > "$notes"
+
+          gh release edit "$RELEASE_TAG" --notes-file "$notes" --draft=false
+          gh release view "$RELEASE_TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

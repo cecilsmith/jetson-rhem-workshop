@@ -33,10 +33,10 @@ Once the system is back up:
 # Flight Control Server Installation
 
 * Go into the `./jetson-rhem-workshop` directory that you cloned
-* Run: `sudo ./1_configure-firewall-and-registry.sh`
-* Run: `sudo ./2_rhem-server-build-commands.sh`
+* Run: `sudo ./server/1_configure-firewall-and-registry.sh`
+* Run: `sudo ./server/2_rhem-server-build-commands.sh`
 
-Once these scripts are complete, you should be able to open the Flight Control web UI at `https://LAPTOP_HOSTNAME`.  The login credentials are admin/admin unless you changed them in the `2_rhem-server-build-commands.sh` script.
+Once these scripts are complete, you should be able to open the Flight Control web UI at `https://LAPTOP_HOSTNAME`.  The login credentials are admin/admin unless you changed them in the `server/2_rhem-server-build-commands.sh` script.
 
 # Post Installation Steps
 
@@ -51,69 +51,71 @@ Add the following line to the end of the `config.yaml` file and save it for use 
 
 # Managed Device Image Creation
 
-The bootc container image is now built by GitHub Actions on a **free, native ARM64
-runner**, so you no longer need to stand up your own ARM build server just to
-produce the image. See [`.github/SECRETS.md`](.github/SECRETS.md) for the
-repository secrets the workflow needs.
+Both images are built by GitHub Actions on a **free, native ARM64 runner**, so
+you do not need your own ARM build server to produce them. See
+[`.github/SECRETS.md`](.github/SECRETS.md) for the repository secrets the
+workflow needs, and [`BUILDING.md`](BUILDING.md) for the full command reference.
 
 > **You still need an aarch64 machine for the ISO step.** CI produces the
-> *container image*; converting it into an installable ISO uses
+> *container images*; converting one into an installable ISO uses
 > `bootc-image-builder`, which has to run on ARM hardware. A Jetson or any
-> aarch64 box work.
+> aarch64 box works.
 
-## Option 1: Download a prebuilt image (recommended)
+## Two images per release
 
-Each successful build publishes a [release](../../releases) tagged with the
-build date:
+Every release ships two variants, identical except for the compose
+implementation. Neither installs a Docker daemon.
 
-* Image name: `localhost/jetson-flightctl-<FLIGHTCTL_VERSION>-<VARIANT>:<YYYY-MM-DD>`
-* Release asset: `jetson-flightctl-<FLIGHTCTL_VERSION>-<VARIANT>-<YYYY-MM-DD>.tar.zst`
+| Image                   | Compose implementation                             |
+| ----------------------- | -------------------------------------------------- |
+| `jetson-docker-compose` | Docker Compose v2 plugin (`docker-compose-plugin`) |
+| `jetson-podman-compose` | `podman-compose` from EPEL                         |
 
-Download that `.tar.zst` plus `SHA256SUMS`, then:
+Names are stable; the Flight Control version and build date live in the **tag**:
+
+```
+localhost/jetson-docker-compose:1.3.0-2026-08-30
+                                ^^^^^ ^^^^^^^^^^
+                                agent  build date
+```
+
+Keeping the version out of the name matters for fielded devices: `bootc upgrade`
+pulls the reference the device was switched to, so a name that changed on every
+version bump would break the upgrade path.
+
+Releases are tagged `v<FLIGHTCTL_VERSION>-<YYYY-MM-DD>`, e.g. `v1.3.0-2026-08-30`.
+
+## When builds happen
+
+* **A new Flight Control release.** A daily scheduled job asks
+  `rpm.flightctl.io` for the newest GA `flightctl-agent` and builds only when
+  that version has not been released here yet. The RPM repository is the trigger
+  rather than the flightctl GitHub releases page because the RPM is what
+  `dnf install` actually consumes — a GitHub release can land before the RPM is
+  published.
+* **A change to `images/Containerfile`** pushed to `main`.
+* **On demand** via **Actions → Build Jetson images → Run workflow**, where you
+  can pin a specific version or force a rebuild.
+
+## Download a prebuilt image
+
+Grab the `.tar.zst` for the variant you want plus its `.sha256`:
 
 ```bash
-sha256sum -c SHA256SUMS
-zstd -d jetson-flightctl-1.3.0-docker-compose-YYYY-MM-DD.tar.zst
-sudo podman load -i jetson-flightctl-1.3.0-docker-compose-YYYY-MM-DD.tar
+VARIANT=jetson-docker-compose      # or jetson-podman-compose
+sha256sum -c ${VARIANT}-1.3.0-2026-08-30.sha256
+zstd -d ${VARIANT}-1.3.0-2026-08-30.tar.zst
+sudo podman load -i ${VARIANT}-1.3.0-2026-08-30.tar
 ```
 
 GitHub attaches *Source code (zip)* and *Source code (tar.gz)* to every release
 automatically and they cannot be removed — those are the repository, not the
-image. Ignore them.
-
-If the image exceeds 2 GiB compressed it is split into `.part00`, `.part01`, …
-Reassemble with `cat ...part* > image.tar.zst` before decompressing; the release
-notes spell this out per build.
-
-## Option 2: Build it yourself
-
-See [`managed-device-artifacts/jetson-bootc-build-commands`](managed-device-artifacts/jetson-bootc-build-commands)
-for the full command reference. In short, on an aarch64 host:
-
-```bash
-mkdir -p .secrets && chmod 700 .secrets
-printf %s 'YOUR_REDHAT_LOGIN'    > .secrets/rh_username
-printf %s 'YOUR_REDHAT_PASSWORD' > .secrets/rh_password
-
-sudo podman build \
-  --secret id=rh_username,src=.secrets/rh_username \
-  --secret id=rh_password,src=.secrets/rh_password \
-  --build-arg USERNAME=redhat --build-arg USER_PASSWD=redhat \
-  --squash \
-  -t localhost/jetson-flightctl-1.3.0-docker-compose:$(date -u +%Y-%m-%d) \
-  -f ./ContainerFile-Jetson-1.3.0-docker-compose .
-```
-
-Red Hat credentials are passed as **build secrets, never as `--build-arg`**:
-`podman` records build-arg values in the image history, so a build arg would ship
-your Red Hat password inside the image. `--squash` matters for the same reason —
-without it the entitlement certificates that `subscription-manager clean` deletes
-in the final layer remain readable in the layer beneath.
+images. Ignore them.
 
 ## Device login
 
-The account baked into the image is **public on purpose** so anyone flashing a
-device can log in:
+The account baked into the images is **public on purpose** so anyone flashing a
+device can log in. Refer to the specific release for login information. The CI runner uses the repo's variables for this, but by default they are:
 
 | Username | Password |
 | -------- | -------- |
@@ -124,27 +126,34 @@ It is in the `wheel` group, so it can `sudo`. Override with the `USERNAME` /
 repository variables in CI. **Change these before deploying a device anywhere
 outside a lab.**
 
-## Which Containerfile gets built
-
-The `ContainerFile-*` symlink at the repository root selects the active build.
-It currently points at the 1.3.0 docker-compose variant. Repoint it to change
-what CI builds — the image name is derived from the filename, so
-`ContainerFile-Jetson-1.3.0-docker-compose` produces
-`jetson-flightctl-1.3.0-docker-compose`.
-
 ## Repository layout
 
-* `ContainerFile-Jetson-1.3.0-docker-compose` (root symlink): selects the active build target.
-* `managed-device-artifacts/ContainerFile-Jetson-1.3.0-docker-compose`: the current image. Includes the Flight Control agent and the `docker-compose` plugin binary — no Docker daemon is installed.
-* `managed-device-artifacts/jetson-bootc-build-commands`: command reference for building the image and turning it into an ISO.
-* `managed-device-artifacts/rhem.ks`: sample kickstart for the `mkksiso` step.
-* `managed-device-artifacts/legacy/`: superseded Containerfiles, kept for reference only and not built by CI.
+```
+server/     Flight Control server setup for the laptop/NUC
+images/     Containerfile (living), rhem.ks, archive/ (frozen snapshots)
+BUILDING.md Command reference: build an image, turn it into an ISO
+```
+
+`images/Containerfile` is the single, living definition of both variants — they
+differ only by the `COMPOSE_PROVIDER` build argument. It floats to current
+versions; CI pins `FLIGHTCTL_VERSION` per build so each release matches its tag.
+
+`images/archive/*.Containerfile` are frozen, fully self-contained snapshots of
+past images, kept for reproducibility and never edited.
+
+## Pinned by the supplier
+
+RHEL **9.4** and JetPack **6.1** are hardcoded because that is the only
+combination NVIDIA publishes a Jetson RPM repository for — `rhel-9.5`,
+`rhel-9.6`, `rhel-10*` and `jp7.x` all 404. The Flight Control RPM repository is
+EPEL 9 only. Revisit if NVIDIA publishes a RHEL 10 path.
 
 ## Continuous integration
 
-* `.github/workflows/build-jetson-image.yml` — builds on `ubuntu-24.04-arm`, verifies no credentials leaked into the image, saves it, and publishes the release. Runs on pushes that touch a Containerfile, or on demand via **Actions → Build Jetson bootc image → Run workflow**.
-* `.github/workflows/secret-scan.yml` — scans the full git history with gitleaks and fails if credential material or files like `config.yaml` ever become tracked.
+* `.github/workflows/build-images.yml` — builds both variants on
+  `ubuntu-24.04-arm`, verifies each image (no leaked credentials, no entitlement
+  certificates, `--squash` took effect, correct agent version, correct compose
+  provider), and publishes one release carrying both.
+* `.github/workflows/secret-scan.yml` — scans the full git history with gitleaks
+  and fails if credential material or files like `config.yaml` become tracked.
 
-> **Version skew:** `2_rhem-server-build-commands.sh` installs Flight Control
-> **1.0.2**, while the current device image ships agent **1.3.0**. Keep the
-> server and agent versions aligned, or expect enrollment trouble.
