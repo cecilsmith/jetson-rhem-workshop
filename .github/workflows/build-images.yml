@@ -49,6 +49,13 @@ permissions:
   contents: write   # create the release
   packages: write   # push the build cache (and optionally the images) to ghcr.io
 
+env:
+  # `gh` infers the repository from the local git remote. The resolve and
+  # finalize jobs never check the repo out — they only make API calls — so
+  # without this every `gh release` call in them dies with
+  # "fatal: not a git repository".
+  GH_REPO: ${{ github.repository }}
+
 concurrency:
   group: build-jetson-images
   cancel-in-progress: false
@@ -145,8 +152,15 @@ jobs:
           # Drafts are excluded deliberately: a build that failed after the
           # draft was created would otherwise look like a completed release and
           # suppress every future retry for that version.
-          existing="$(gh release list --limit 100 --json tagName,isDraft \
-                        --jq '.[] | select(.isDraft | not) | .tagName' 2>/dev/null || true)"
+          #
+          # Do NOT swallow errors here. If the listing fails, "no releases
+          # found" is indistinguishable from "nothing built yet", and the daily
+          # schedule would rebuild the same version every single day.
+          if ! existing="$(gh release list --limit 100 --json tagName,isDraft \
+                             --jq '.[] | select(.isDraft | not) | .tagName' 2>&1)"; then
+            echo "::error::Could not list existing releases: ${existing}"
+            exit 1
+          fi
           already=no
           if printf '%s\n' "$existing" | grep -q "^v${version}-"; then already=yes; fi
 
