@@ -150,3 +150,6 @@ LABEL org.opencontainers.image.source="https://github.com/cecilsmith/jetson-rhem
 
 RUN subscription-manager unregister && \
     subscription-manager clean
+
+# Clean up all logs and caches
+rm /var/{log,cache,lib}/* -rf
