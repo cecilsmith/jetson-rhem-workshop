@@ -1,11 +1,11 @@
-# gitleaks configuration for jetson-rhem-workshop
+# gitleaks configuration for jetson-bootc-flightctl
 #
 # Extends the upstream default ruleset and adds rules for the credential
 # shapes that actually show up in this repo: Red Hat subscription/registry
 # logins, container registry pull secrets, Flight Control enrollment configs,
 # baked-in device passwords in the Jetson Containerfiles.
 
-title = "jetson-rhem-workshop secret scanning"
+title = "jetson-bootc-flightctl secret scanning"
 
 [extend]
 useDefault = true

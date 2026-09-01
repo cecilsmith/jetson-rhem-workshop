@@ -141,7 +141,7 @@ RUN dnf config-manager --add-repo https://rpm.flightctl.io/flightctl-epel.repo &
 
 # Record what this image actually contains, so `podman inspect` answers the
 # question without booting a device.
-LABEL org.opencontainers.image.source="https://github.com/cecilsmith/jetson-rhem-workshop" \
+LABEL org.opencontainers.image.source="https://github.com/cecilsmith/jetson-bootc-flightctl" \
       org.opencontainers.image.description="NVIDIA Jetson Orin RHEL bootc image with the Flight Control agent" \
       io.flightctl.agent.version="${FLIGHTCTL_VERSION}" \
       io.jetson.compose-provider="${COMPOSE_PROVIDER}" \

@@ -33,8 +33,8 @@ Both are optional. Leave them unset and the build uses the defaults above, which
 match the `ARG` defaults in the Containerfile.
 
 ```bash
-gh variable set DEVICE_USERNAME    --body redhat --repo cecilsmith/jetson-rhem-workshop
-gh variable set DEVICE_USER_PASSWD --body redhat --repo cecilsmith/jetson-rhem-workshop
+gh variable set DEVICE_USERNAME    --body redhat --repo cecilsmith/jetson-bootc-flightctl
+gh variable set DEVICE_USER_PASSWD --body redhat --repo cecilsmith/jetson-bootc-flightctl
 ```
 
 These are passed as ordinary `--build-arg` values, which is correct here for the
@@ -56,7 +56,7 @@ pulls, so a leak does not hand over your Red Hat account.
 
 ### Web UI
 
-1. Go to `https://github.com/cecilsmith/jetson-rhem-workshop/settings/secrets/actions`
+1. Go to `https://github.com/cecilsmith/jetson-bootc-flightctl/settings/secrets/actions`
    (repo → **Settings** → **Secrets and variables** → **Actions**).
 2. **New repository secret**, one per row in the tables above.
 3. Name must match exactly — the `resolve` job lists any that are missing and
@@ -65,17 +65,17 @@ pulls, so a leak does not hand over your Red Hat account.
 ### `gh` CLI
 
 ```bash
-gh secret set REDHAT_REGISTRY_USERNAME --repo cecilsmith/jetson-rhem-workshop
-gh secret set REDHAT_REGISTRY_PASSWORD --repo cecilsmith/jetson-rhem-workshop
-gh secret set RH_USERNAME              --repo cecilsmith/jetson-rhem-workshop
-gh secret set RH_PASSWD                --repo cecilsmith/jetson-rhem-workshop
+gh secret set REDHAT_REGISTRY_USERNAME --repo cecilsmith/jetson-bootc-flightctl
+gh secret set REDHAT_REGISTRY_PASSWORD --repo cecilsmith/jetson-bootc-flightctl
+gh secret set RH_USERNAME              --repo cecilsmith/jetson-bootc-flightctl
+gh secret set RH_PASSWD                --repo cecilsmith/jetson-bootc-flightctl
 ```
 
 Each prompts for the value on stdin, so it never lands in your shell history.
 Verify (names and update times only — values are never readable back):
 
 ```bash
-gh secret list --repo cecilsmith/jetson-rhem-workshop
+gh secret list --repo cecilsmith/jetson-bootc-flightctl
 ```
 
 ## Also turn on GitHub's built-in scanning

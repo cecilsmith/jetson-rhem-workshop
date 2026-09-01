@@ -28,11 +28,11 @@ even lower on RAM if needed.
 Once the system is back up:
 
 * `sudo dnf install -y git`
-* `git clone https://github.com/cecilsmith/jetson-rhem-workshop`
+* `git clone https://github.com/cecilsmith/jetson-bootc-flightctl`
 
 # Flight Control Server Installation
 
-* Go into the `./jetson-rhem-workshop` directory that you cloned
+* Go into the `./jetson-bootc-flightctl` directory that you cloned
 * Run: `sudo ./server/1_configure-firewall-and-registry.sh`
 * Run: `sudo ./server/2_rhem-server-build-commands.sh`
 
