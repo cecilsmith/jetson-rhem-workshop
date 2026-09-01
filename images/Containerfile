@@ -152,4 +152,4 @@ RUN subscription-manager unregister && \
     subscription-manager clean
 
 # Clean up all logs and caches
-rm /var/{log,cache,lib}/* -rf
+RUN rm /var/{log,cache,lib}/* -rf
