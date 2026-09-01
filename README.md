@@ -5,6 +5,8 @@ homelab.  If you want to learn more about this project, check out its repo [here
 Also included in this repository are commands and ContainerFiles for creating NVIDIA Jetson Red Hat Enterprise Linux Image Mode (bootc) images 
 that will be used to flash edge devices managed by Flight Control.
 
+> Note: This repo was originally a fork of [tarexveff/jetson-rhem-workshop](https://github.com/tarexveff/jetson-rhem-workshop). It has since un-forked itself as this repo has gone in a different direction than the original's.
+
 # Prerequisites
  
 * A laptop running Red Hat Enterprise Linux 9.x or 10.x
